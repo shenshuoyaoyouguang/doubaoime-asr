@@ -1,19 +1,15 @@
 param(
-    [string]$Python = ".\\venv_win\\Scripts\\python.exe"
+    [string]$Python = ".\\venv_win\\Scripts\\python.exe",
+    [string]$CMake = "cmake"
 )
 
 $ErrorActionPreference = "Stop"
 
 & $Python -m pip install -e ".[desktop,build]"
 
+& ".\\scripts\\build_overlay_ui.ps1" -CMake $CMake
+
 & $Python -m PyInstaller `
   --noconfirm `
   --clean `
-  --noupx `
-  --onedir `
-  --windowed `
-  --name "doubao-voice-agent" `
-  --add-data "opus.dll;." `
-  --add-data "libgcc_s_seh-1.dll;." `
-  --add-data "libwinpthread-1.dll;." `
-  "scripts\\voice_agent_entry.py"
+  "doubao-voice-agent.spec"
