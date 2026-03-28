@@ -1,4 +1,10 @@
 import ctypes
+import sys
+
+import pytest
+
+if sys.platform != "win32":
+    pytest.skip("SendInput ABI size is Windows-specific", allow_module_level=True)
 
 from doubaoime_asr.agent.input_injector import INPUT
 

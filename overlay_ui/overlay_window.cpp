@@ -183,6 +183,7 @@ void OverlayWindow::Configure(OverlayStyle style) {
 }
 
 void OverlayWindow::Stop() {
+    ReleaseBitmapResources();
     if (hwnd_ != nullptr) {
         DestroyWindow(hwnd_);
         hwnd_ = nullptr;
@@ -248,6 +249,7 @@ LRESULT OverlayWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam)
         return HTTRANSPARENT;
     case WM_DESTROY:
         KillTimer(hwnd_, kAnimationTimerId);
+        ReleaseBitmapResources();
         PostQuitMessage(0);
         return 0;
     default:
@@ -368,6 +370,71 @@ bool OverlayWindow::EnsureDeviceResources() {
     return true;
 }
 
+bool OverlayWindow::EnsureBitmapResources() {
+    if (screen_dc_ == nullptr) {
+        screen_dc_ = GetDC(nullptr);
+        if (screen_dc_ == nullptr) {
+            Log("acquire screen dc failed");
+            return false;
+        }
+    }
+
+    if (memory_dc_ == nullptr) {
+        memory_dc_ = CreateCompatibleDC(screen_dc_);
+        if (memory_dc_ == nullptr) {
+            Log("create memory dc failed error=" + std::to_string(GetLastError()));
+            ReleaseDC(nullptr, screen_dc_);
+            screen_dc_ = nullptr;
+            return false;
+        }
+    }
+
+    if (bitmap_ != nullptr && bitmap_width_px_ == width_px_ && bitmap_height_px_ == height_px_) {
+        return true;
+    }
+
+    if (bitmap_ != nullptr) {
+        if (memory_dc_default_bitmap_ != nullptr) {
+            SelectObject(memory_dc_, memory_dc_default_bitmap_);
+        }
+        DeleteObject(bitmap_);
+        bitmap_ = nullptr;
+    }
+
+    BITMAPINFO bitmap_info{};
+    bitmap_info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bitmap_info.bmiHeader.biWidth = width_px_;
+    bitmap_info.bmiHeader.biHeight = -height_px_;
+    bitmap_info.bmiHeader.biPlanes = 1;
+    bitmap_info.bmiHeader.biBitCount = 32;
+    bitmap_info.bmiHeader.biCompression = BI_RGB;
+
+    HBITMAP bitmap = CreateDIBSection(memory_dc_, &bitmap_info, DIB_RGB_COLORS, nullptr, nullptr, 0);
+    if (bitmap == nullptr) {
+        Log("create dib section failed error=" + std::to_string(GetLastError()));
+        bitmap_width_px_ = 0;
+        bitmap_height_px_ = 0;
+        return false;
+    }
+
+    const HGDIOBJ previous_bitmap = SelectObject(memory_dc_, bitmap);
+    if (previous_bitmap == nullptr || previous_bitmap == HGDI_ERROR) {
+        Log("select bitmap failed error=" + std::to_string(GetLastError()));
+        DeleteObject(bitmap);
+        bitmap_width_px_ = 0;
+        bitmap_height_px_ = 0;
+        return false;
+    }
+    if (memory_dc_default_bitmap_ == nullptr) {
+        memory_dc_default_bitmap_ = previous_bitmap;
+    }
+
+    bitmap_ = bitmap;
+    bitmap_width_px_ = width_px_;
+    bitmap_height_px_ = height_px_;
+    return true;
+}
+
 void OverlayWindow::ApplyWindowAttributes() {
     if (hwnd_ == nullptr) {
         return;
@@ -464,30 +531,12 @@ void OverlayWindow::Render() {
     if (hwnd_ == nullptr || text_layout_ == nullptr || width_px_ <= 0 || height_px_ <= 0) {
         return;
     }
-    if (!EnsureDeviceResources()) {
+    if (!EnsureDeviceResources() || !EnsureBitmapResources()) {
         return;
     }
 
-    HDC screen_dc = GetDC(nullptr);
-    HDC memory_dc = CreateCompatibleDC(screen_dc);
-    BITMAPINFO bitmap_info{};
-    bitmap_info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bitmap_info.bmiHeader.biWidth = width_px_;
-    bitmap_info.bmiHeader.biHeight = -height_px_;
-    bitmap_info.bmiHeader.biPlanes = 1;
-    bitmap_info.bmiHeader.biBitCount = 32;
-    bitmap_info.bmiHeader.biCompression = BI_RGB;
-
-    HBITMAP bitmap = CreateDIBSection(memory_dc, &bitmap_info, DIB_RGB_COLORS, nullptr, nullptr, 0);
-    if (bitmap == nullptr) {
-        DeleteDC(memory_dc);
-        ReleaseDC(nullptr, screen_dc);
-        return;
-    }
-
-    const HGDIOBJ old_bitmap = SelectObject(memory_dc, bitmap);
     const RECT paint_rect{0, 0, width_px_, height_px_};
-    HRESULT hr = dc_render_target_->BindDC(memory_dc, &paint_rect);
+    HRESULT hr = dc_render_target_->BindDC(memory_dc_, &paint_rect);
     if (SUCCEEDED(hr)) {
         dc_render_target_->BeginDraw();
         dc_render_target_->SetTransform(D2D1::Matrix3x2F::Identity());
@@ -539,15 +588,31 @@ void OverlayWindow::Render() {
         blend.BlendOp = AC_SRC_OVER;
         blend.SourceConstantAlpha = 255;
         blend.AlphaFormat = AC_SRC_ALPHA;
-        UpdateLayeredWindow(hwnd_, screen_dc, &destination, &size, memory_dc, &source, 0, &blend, ULW_ALPHA);
+        UpdateLayeredWindow(hwnd_, screen_dc_, &destination, &size, memory_dc_, &source, 0, &blend, ULW_ALPHA);
     } else {
         Log("render failed hr=" + HrToString(hr));
     }
+}
 
-    SelectObject(memory_dc, old_bitmap);
-    DeleteObject(bitmap);
-    DeleteDC(memory_dc);
-    ReleaseDC(nullptr, screen_dc);
+void OverlayWindow::ReleaseBitmapResources() {
+    if (memory_dc_ != nullptr && bitmap_ != nullptr && memory_dc_default_bitmap_ != nullptr) {
+        SelectObject(memory_dc_, memory_dc_default_bitmap_);
+    }
+    if (bitmap_ != nullptr) {
+        DeleteObject(bitmap_);
+        bitmap_ = nullptr;
+    }
+    if (memory_dc_ != nullptr) {
+        DeleteDC(memory_dc_);
+        memory_dc_ = nullptr;
+    }
+    if (screen_dc_ != nullptr) {
+        ReleaseDC(nullptr, screen_dc_);
+        screen_dc_ = nullptr;
+    }
+    memory_dc_default_bitmap_ = nullptr;
+    bitmap_width_px_ = 0;
+    bitmap_height_px_ = 0;
 }
 
 void OverlayWindow::StartAnimation(float target_opacity) {

@@ -154,16 +154,12 @@ class OverlayPreview:
             self._logger.info("overlay_backend=native")
         except Exception:
             self._logger.exception("overlay_native_start_failed")
-            backend = TkOverlayPreview()
-            backend.start()
-            backend.configure(self._config)
-            self._backend = backend
-            self._using_legacy = True
-            self._logger.info("overlay_backend=tk_fallback")
+            self._activate_legacy_backend(log_message="overlay_fallback_start_failed")
 
     def _invoke(self, method: str, *args: object, **kwargs: object) -> None:
         self._ensure_backend_started()
-        assert self._backend is not None
+        if self._backend is None:
+            return
         try:
             getattr(self._backend, method)(*args, **kwargs)
         except Exception:
@@ -174,9 +170,37 @@ class OverlayPreview:
                 self._backend.stop()
             except Exception:
                 self._logger.exception("overlay_native_stop_failed")
-            fallback = TkOverlayPreview()
-            fallback.start()
-            fallback.configure(self._config)
-            self._backend = fallback
-            self._using_legacy = True
-            getattr(self._backend, method)(*args, **kwargs)
+            if not self._activate_legacy_backend(
+                log_message="overlay_fallback_failed method=%s",
+                method=method,
+            ):
+                return
+            assert self._backend is not None
+            try:
+                getattr(self._backend, method)(*args, **kwargs)
+            except Exception:
+                self._logger.exception("overlay_fallback_failed method=%s", method)
+                try:
+                    self._backend.stop()
+                except Exception:
+                    self._logger.exception("overlay_fallback_stop_failed")
+                self._backend = None
+                self._using_legacy = False
+
+    def _activate_legacy_backend(self, *, log_message: str, method: str | None = None) -> bool:
+        try:
+            backend = TkOverlayPreview()
+            backend.start()
+            backend.configure(self._config)
+        except Exception:
+            self._backend = None
+            self._using_legacy = False
+            if method is None:
+                self._logger.exception(log_message)
+            else:
+                self._logger.exception(log_message, method)
+            return False
+        self._backend = backend
+        self._using_legacy = True
+        self._logger.info("overlay_backend=tk_fallback")
+        return True

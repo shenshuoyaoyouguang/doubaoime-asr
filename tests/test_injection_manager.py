@@ -64,3 +64,36 @@ def test_terminal_injection_uses_terminal_profile(monkeypatch):
 
     assert result.method == "terminal_ctrl_shift_v"
     assert result.target_profile == "terminal"
+
+
+@pytest.mark.parametrize(
+    ("method_name", "send_attr"),
+    [
+        ("_sendinput_paste", "send_ctrl_v"),
+        ("_send_ctrl_shift_v_paste", "send_ctrl_shift_v"),
+        ("_shift_insert_paste", "send_shift_insert"),
+    ],
+)
+def test_clipboard_paste_methods_restore_before_reraising(monkeypatch, method_name: str, send_attr: str):
+    manager = TextInjectionManager(logging.getLogger("inject-test"))
+    events: list[tuple[object, ...]] = []
+
+    monkeypatch.setattr(manager.injector, "ensure_target", lambda target: None)
+    monkeypatch.setattr("doubaoime_asr.agent.injection_manager.capture_clipboard_text", lambda: "old")
+    monkeypatch.setattr("doubaoime_asr.agent.injection_manager.set_clipboard_text", lambda text: 7)
+
+    async def fake_restore(snapshot, *, expected_sequence):
+        events.append(("restore", snapshot, expected_sequence))
+        return True
+
+    def fake_send() -> None:
+        events.append(("send",))
+        raise RuntimeError("paste failed")
+
+    monkeypatch.setattr("doubaoime_asr.agent.injection_manager.restore_clipboard_text", fake_restore)
+    monkeypatch.setattr(f"doubaoime_asr.agent.injection_manager.{send_attr}", fake_send)
+
+    with pytest.raises(RuntimeError, match="paste failed"):
+        asyncio.run(getattr(manager, method_name)(FocusTarget(hwnd=1), "hello"))
+
+    assert events == [("send",), ("restore", "old", 7)]

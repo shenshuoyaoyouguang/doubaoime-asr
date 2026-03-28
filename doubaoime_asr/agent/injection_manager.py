@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 import logging
 
@@ -120,9 +121,7 @@ class TextInjectionManager:
         raise RuntimeError("all injection methods failed")
 
     async def _uia_clipboard_paste(self, target: FocusTarget, text: str) -> bool:
-        snapshot = capture_clipboard_text()
-        sequence = set_clipboard_text(text)
-        try:
+        def paste() -> None:
             hwnd = target.focus_hwnd or target.hwnd
             wrapper = Desktop(backend="uia").window(handle=hwnd).wrapper_object()
             try:
@@ -133,26 +132,19 @@ class TextInjectionManager:
                 wrapper.type_keys("^v", set_foreground=False)
             except Exception:
                 send_keys("^v", with_spaces=True, pause=0.01)
-        finally:
-            return await restore_clipboard_text(snapshot, expected_sequence=sequence)
+
+        return await self._run_clipboard_paste(text, paste)
 
     async def _wm_paste(self, target: FocusTarget, text: str) -> bool:
-        snapshot = capture_clipboard_text()
-        sequence = set_clipboard_text(text)
-        try:
+        def paste() -> None:
             hwnd = target.focus_hwnd or target.hwnd
             send_wm_paste(hwnd)
-        finally:
-            return await restore_clipboard_text(snapshot, expected_sequence=sequence)
+
+        return await self._run_clipboard_paste(text, paste)
 
     async def _sendinput_paste(self, target: FocusTarget, text: str) -> bool:
         self.injector.ensure_target(target)
-        snapshot = capture_clipboard_text()
-        sequence = set_clipboard_text(text)
-        try:
-            send_ctrl_v()
-        finally:
-            return await restore_clipboard_text(snapshot, expected_sequence=sequence)
+        return await self._run_clipboard_paste(text, send_ctrl_v)
 
     async def _inject_terminal(self, target: FocusTarget, text: str) -> InjectionResult:
         if target.terminal_kind == "windows_terminal":
@@ -188,18 +180,21 @@ class TextInjectionManager:
 
     async def _send_ctrl_shift_v_paste(self, target: FocusTarget, text: str) -> bool:
         self.injector.ensure_target(target)
-        snapshot = capture_clipboard_text()
-        sequence = set_clipboard_text(text)
-        try:
-            send_ctrl_shift_v()
-        finally:
-            return await restore_clipboard_text(snapshot, expected_sequence=sequence)
+        return await self._run_clipboard_paste(text, send_ctrl_shift_v)
 
     async def _shift_insert_paste(self, target: FocusTarget, text: str) -> bool:
         self.injector.ensure_target(target)
+        return await self._run_clipboard_paste(text, send_shift_insert)
+
+    async def _run_clipboard_paste(self, text: str, action: Callable[[], None]) -> bool:
         snapshot = capture_clipboard_text()
         sequence = set_clipboard_text(text)
+        exc_to_raise: Exception | None = None
         try:
-            send_shift_insert()
-        finally:
-            return await restore_clipboard_text(snapshot, expected_sequence=sequence)
+            action()
+        except Exception as exc:
+            exc_to_raise = exc
+        restored = await restore_clipboard_text(snapshot, expected_sequence=sequence)
+        if exc_to_raise is not None:
+            raise exc_to_raise
+        return restored

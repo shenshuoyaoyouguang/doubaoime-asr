@@ -65,9 +65,11 @@ private:
     bool InitializeFactories();
     bool EnsureTextFormat();
     bool EnsureDeviceResources();
+    bool EnsureBitmapResources();
     void ApplyWindowAttributes();
     void RebuildLayout();
     void UpdateGeometry();
+    void ReleaseBitmapResources();
     void Render();
     void StartAnimation(float target_opacity);
     void TickAnimation();
@@ -102,6 +104,12 @@ private:
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> border_brush_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> shadow_brush_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> text_brush_;
+    HDC screen_dc_ = nullptr;
+    HDC memory_dc_ = nullptr;
+    HBITMAP bitmap_ = nullptr;
+    HGDIOBJ memory_dc_default_bitmap_ = nullptr;
+    int bitmap_width_px_ = 0;
+    int bitmap_height_px_ = 0;
 };
 
 }  // namespace overlay_ui

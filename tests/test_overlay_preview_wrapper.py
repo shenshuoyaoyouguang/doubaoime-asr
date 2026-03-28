@@ -1,5 +1,7 @@
 import logging
 
+import pytest
+
 from doubaoime_asr.agent import overlay_preview
 
 
@@ -38,8 +40,51 @@ def test_overlay_preview_falls_back_to_tk(monkeypatch):
 
     preview = overlay_preview.OverlayPreview(logging.getLogger("overlay-test"))
     preview.start()
-    preview.show("你好")
+    preview.show("hello")
 
     assert legacy_backend.calls[0][0] == "start"
     assert legacy_backend.calls[1][0] == "configure"
-    assert legacy_backend.calls[2] == ("show", ("你好", 0, "interim"))
+    assert legacy_backend.calls[2] == ("show", ("hello", 0, "interim"))
+
+
+class _BrokenNativeCall:
+    def __init__(self, *, logger=None):
+        self.logger = logger
+
+    def start(self) -> None:
+        return None
+
+    def configure(self, config) -> None:
+        return None
+
+    def show(self, text: str, *, seq: int = 0, kind: str = "interim") -> None:
+        raise RuntimeError("native show failed")
+
+    def stop(self) -> None:
+        return None
+
+
+class _BrokenLegacyBackend:
+    def start(self) -> None:
+        raise RuntimeError("legacy start failed")
+
+    def configure(self, config) -> None:
+        return None
+
+    def show(self, text: str, *, seq: int = 0, kind: str = "interim") -> None:
+        return None
+
+    def stop(self) -> None:
+        return None
+
+
+def test_overlay_preview_logs_fallback_failures(monkeypatch, caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.ERROR)
+    monkeypatch.setattr(overlay_preview, "OverlayPreviewCpp", _BrokenNativeCall)
+    monkeypatch.setattr(overlay_preview, "TkOverlayPreview", _BrokenLegacyBackend)
+
+    preview = overlay_preview.OverlayPreview(logging.getLogger("overlay-test"))
+    preview.start()
+    preview.show("hello")
+
+    assert "overlay_fallback_failed method=show" in caplog.text

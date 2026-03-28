@@ -28,10 +28,11 @@ Mode = Literal["recognize", "inject"]
 
 @dataclass(slots=True)
 class WorkerSession:
+    session_id: int
     process: asyncio.subprocess.Process
-    stdout_task: asyncio.Task[None]
-    stderr_task: asyncio.Task[None]
-    wait_task: asyncio.Task[None]
+    stdout_task: asyncio.Task[None] | None = None
+    stderr_task: asyncio.Task[None] | None = None
+    wait_task: asyncio.Task[None] | None = None
     process_ready: bool = False
     active: bool = False
     target: FocusTarget | None = None
@@ -99,6 +100,7 @@ class StableVoiceInputApp:
         self._settings_controller: SettingsWindowController | None = None
         self._pending_listener_rebind = False
         self._pending_worker_restart = False
+        self._next_worker_session_id = 0
 
     def set_status(self, value: str) -> None:
         with self._status_lock:
@@ -169,9 +171,13 @@ class StableVoiceInputApp:
                     elif kind == "release":
                         await self._handle_release()
                     elif kind == "worker_event":
-                        await self._handle_worker_event(payload)
+                        if isinstance(payload, tuple) and len(payload) == 2:
+                            session_id, event = payload
+                            await self._handle_worker_event(int(session_id), event)
                     elif kind == "worker_exit":
-                        await self._handle_worker_exit(int(payload))
+                        if isinstance(payload, tuple) and len(payload) == 2:
+                            session_id, code = payload
+                            await self._handle_worker_exit(int(session_id), int(code))
                     elif kind == "apply_config":
                         if isinstance(payload, AgentConfig):
                             await self._apply_config(payload)
@@ -267,12 +273,14 @@ class StableVoiceInputApp:
             await self._dispose_worker()
 
         process = await self._spawn_worker()
+        self._next_worker_session_id += 1
         session = WorkerSession(
+            session_id=self._next_worker_session_id,
             process=process,
-            stdout_task=asyncio.create_task(self._read_worker_stdout(process.stdout)),
-            stderr_task=asyncio.create_task(self._read_worker_stderr(process.stderr)),
-            wait_task=asyncio.create_task(self._wait_worker(process)),
         )
+        session.stdout_task = asyncio.create_task(self._read_worker_stdout(process.stdout, session))
+        session.stderr_task = asyncio.create_task(self._read_worker_stderr(process.stderr))
+        session.wait_task = asyncio.create_task(self._wait_worker(process, session.session_id))
         self._session = session
 
         deadline = asyncio.get_running_loop().time() + 2.5
@@ -318,7 +326,7 @@ class StableVoiceInputApp:
             return [sys.executable, *args]
         return [sys.executable, "-m", "doubaoime_asr.agent.stable_main", *args]
 
-    async def _read_worker_stdout(self, stream: asyncio.StreamReader | None) -> None:
+    async def _read_worker_stdout(self, stream: asyncio.StreamReader | None, session: WorkerSession) -> None:
         if stream is None:
             return
         while True:
@@ -333,9 +341,9 @@ class StableVoiceInputApp:
             except json.JSONDecodeError:
                 self.logger.error("worker_stdout_invalid=%s", raw)
                 continue
-            if event.get("type") == "worker_ready" and self._session is not None:
-                self._session.process_ready = True
-            self._emit("worker_event", event)
+            if event.get("type") == "worker_ready":
+                session.process_ready = True
+            self._emit("worker_event", (session.session_id, event))
 
     async def _read_worker_stderr(self, stream: asyncio.StreamReader | None) -> None:
         if stream is None:
@@ -346,32 +354,38 @@ class StableVoiceInputApp:
                 break
             self.logger.error("worker_stderr=%s", line.decode("utf-8", errors="replace").rstrip())
 
-    async def _wait_worker(self, process: asyncio.subprocess.Process) -> None:
+    async def _wait_worker(self, process: asyncio.subprocess.Process, session_id: int) -> None:
         code = await process.wait()
-        self._emit("worker_exit", code)
+        self._emit("worker_exit", (session_id, code))
 
-    async def _handle_worker_event(self, event: object) -> None:
+    async def _handle_worker_event(self, session_id: int, event: object) -> None:
         if not isinstance(event, dict):
             return
         event_type = event.get("type")
         self.logger.info("worker_event=%s payload=%s", event_type, event)
 
-        if event_type == "worker_ready":
-            if self._session is not None:
-                self._session.process_ready = True
+        if self._session is None or self._session.session_id != session_id:
+            self.logger.info(
+                "worker_event_ignored session_id=%s current_session_id=%s type=%s",
+                session_id,
+                self._session.session_id if self._session is not None else None,
+                event_type,
+            )
             return
+        session = self._session
 
-        if self._session is None:
+        if event_type == "worker_ready":
+            session.process_ready = True
             return
 
         if event_type == "ready":
-            if self._session.active:
-                self._session.ready = True
-                self.set_status("录音中，等待说话…")
+            if session.active:
+                session.ready = True
+                self.set_status("录音中，等待说话")
                 await self._send_stop_if_needed()
         elif event_type == "streaming_started":
-            if self._session.active:
-                self._session.streaming_started = True
+            if session.active:
+                session.streaming_started = True
             self.logger.info(
                 "worker_streaming_started chunks=%s bytes=%s",
                 event.get("chunks"),
@@ -384,7 +398,7 @@ class StableVoiceInputApp:
                 self.set_status(message)
         elif event_type == "interim":
             text = str(event.get("text", ""))
-            if text and self._session.active:
+            if text and session.active:
                 if self.console:
                     print(f"\r[识别中] {text}", end="", flush=True)
                 await self.overlay_scheduler.submit_interim(text)
@@ -428,7 +442,15 @@ class StableVoiceInputApp:
             self.logger.exception("inject_final_failed")
             self.set_status("注入失败，仅保留识别")
 
-    async def _handle_worker_exit(self, code: int) -> None:
+    async def _handle_worker_exit(self, session_id: int, code: int) -> None:
+        if self._session is None or self._session.session_id != session_id:
+            self.logger.info(
+                "worker_exit_ignored session_id=%s current_session_id=%s code=%s",
+                session_id,
+                self._session.session_id if self._session is not None else None,
+                code,
+            )
+            return
         self.logger.info("worker_exit code=%s", code)
         if not self._stopping and code != 0 and not self._status.startswith("识别失败"):
             self.set_status(f"识别进程异常退出: {code}")
@@ -507,37 +529,64 @@ class StableVoiceInputApp:
     async def _apply_config(self, new_config: AgentConfig) -> None:
         old_config = self.config
         old_mode = self.mode
+        old_pending_listener_rebind = self._pending_listener_rebind
+        old_pending_worker_restart = self._pending_worker_restart
         hotkey_changed = old_config.effective_hotkey_vk() != new_config.effective_hotkey_vk()
         worker_changed = (
             old_config.credential_path != new_config.credential_path
             or old_config.microphone_device != new_config.microphone_device
         )
-
-        self.config = new_config
-        self.mode = new_config.mode
-        self.injection_manager.set_policy(new_config.injection_policy)
-        self.preview.configure(new_config)
-        self.overlay_scheduler.configure(new_config)
+        session_active = self._session is not None and self._session.active
+        listener_rebound = False
+        worker_restarted = False
 
         try:
-            if hotkey_changed and (self._session is None or not self._session.active):
-                self._rebind_listener(new_config.effective_hotkey_vk())
-            elif hotkey_changed:
-                self._pending_listener_rebind = True
+            self.config = new_config
+            self.mode = new_config.mode
+            self.injection_manager.set_policy(new_config.injection_policy)
+            self.preview.configure(new_config)
+            self.overlay_scheduler.configure(new_config)
 
-            if worker_changed and (self._session is None or not self._session.active):
-                await self._restart_worker()
-            elif worker_changed:
-                self._pending_worker_restart = True
+            if hotkey_changed:
+                if session_active:
+                    self._pending_listener_rebind = True
+                else:
+                    self._rebind_listener(new_config.effective_hotkey_vk())
+                    listener_rebound = True
+
+            if worker_changed:
+                if session_active:
+                    self._pending_worker_restart = True
+                else:
+                    await self._restart_worker()
+                    worker_restarted = True
 
             self.config.save()
         except Exception:
             self.logger.exception("apply_config_failed")
             self.config = old_config
             self.mode = old_mode
+            self._pending_listener_rebind = old_pending_listener_rebind
+            self._pending_worker_restart = old_pending_worker_restart
             self.injection_manager.set_policy(old_config.injection_policy)
             self.preview.configure(old_config)
-            self.config.save()
+            self.overlay_scheduler.configure(old_config)
+            if listener_rebound:
+                try:
+                    self._rebind_listener(old_config.effective_hotkey_vk())
+                except Exception:
+                    self.logger.exception("apply_config_rollback_listener_failed")
+            if worker_restarted:
+                try:
+                    await self._restart_worker()
+                except Exception:
+                    self.logger.exception("apply_config_rollback_worker_failed")
+            try:
+                self.config.save()
+            except Exception:
+                self.logger.exception("apply_config_rollback_save_failed")
+                self.set_status("设置保存失败，请检查日志并手动确认配置")
+                return
             self.set_status("设置保存失败，已恢复旧配置")
             return
 
@@ -545,7 +594,7 @@ class StableVoiceInputApp:
             with contextlib.suppress(Exception):
                 self._tray_icon.update_menu()
 
-        if self._session is None or not self._session.active:
+        if not session_active:
             if hotkey_changed:
                 self.set_status(f"热键已更新为 {new_config.effective_hotkey_display()}")
             elif worker_changed:
