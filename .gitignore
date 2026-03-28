@@ -1,0 +1,34 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+venv_win/
+
+# Test and cache
+.pytest_cache/
+
+# Tool state directories
+.omc/
+.omx/
+.codex-tasks/
+
+# Sensitive files
+credentials.json
+
+# Unrelated third-party software
+Nicotine+/
+
+# Source code (compiled DLL already exists)
+opus-1.6.1/
+
+# Hooks
+hook_*.js
+
+# Old version directory
+doubaoime_v1.1.2_100102018_official
