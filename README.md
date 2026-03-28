@@ -146,9 +146,19 @@ python -m doubaoime_asr.agent.stable_main
 ```json
 {
   "hotkey": "f8",
+  "hotkey_vk": 119,
+  "hotkey_display": "F8",
+  "mode": "inject",
   "microphone_device": null,
   "credential_path": "%APPDATA%/DoubaoVoiceInput/credentials.json",
-  "render_debounce_ms": 80
+  "injection_policy": "direct_then_clipboard",
+  "render_debounce_ms": 80,
+  "overlay_render_fps": 30,
+  "overlay_font_size": 14,
+  "overlay_max_width": 620,
+  "overlay_opacity_percent": 92,
+  "overlay_bottom_offset": 120,
+  "overlay_animation_ms": 150
 }
 ```
 
@@ -164,8 +174,11 @@ doubao-voice-agent --hotkey f9 --render-debounce-ms 50
 doubao-voice-agent --hotkey space
 doubao-voice-agent --mode inject
 doubao-voice-agent --mode recognize --console
+doubao-voice-agent --injection-policy direct_then_clipboard
 doubao-voice-agent --no-tray --console
 ```
+
+托盘菜单现在提供 **“设置”** 入口，可以直接修改热键、注入策略、麦克风和悬浮窗样式；保存后会尽量即时生效。热键支持**录制任意单键**。默认注入策略是 `direct_then_clipboard`：先尝试直接输入，只有直接输入失败时才会使用剪贴板回退。如果你明确不希望任何情况下触碰剪贴板，可以改成 `direct_only`。终端（Windows Terminal / cmd / PowerShell）会自动使用终端专用注入策略。
 
 ### 打包为可分发程序
 
@@ -176,8 +189,10 @@ doubao-voice-agent --no-tray --console
 该脚本会：
 
 - 安装 `.[desktop,build]`
+- 先用 CMake 编译 `overlay_ui.exe`
 - 用 PyInstaller 生成 `dist/doubao-voice-agent/`
 - 自动带上 `opus.dll` 及其依赖 DLL
+- 自动带上原生 `overlay_ui.exe`
 
 ### 已知限制
 
