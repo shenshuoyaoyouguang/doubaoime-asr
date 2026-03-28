@@ -1,6 +1,6 @@
 import pytest
 
-from doubaoime_asr.agent.win_hotkey import normalize_hotkey, vk_from_hotkey
+from doubaoime_asr.agent.win_hotkey import normalize_hotkey, vk_from_hotkey, vk_to_display
 
 
 def test_normalize_hotkey():
@@ -18,3 +18,8 @@ def test_vk_from_hotkey():
 def test_vk_from_hotkey_rejects_unsupported():
     with pytest.raises(ValueError):
         vk_from_hotkey("ctrl+space")
+
+
+def test_vk_to_display_formats_known_keys():
+    assert vk_to_display(0x77) == "F8"
+    assert vk_to_display(ord("A")) == "A"

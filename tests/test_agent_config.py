@@ -1,16 +1,30 @@
 from pathlib import Path
 import sys
 
-from doubaoime_asr.agent.config import AgentConfig, discover_preferred_credential_path
+from doubaoime_asr.agent.config import (
+    AgentConfig,
+    INJECTION_POLICY_DIRECT_THEN_CLIPBOARD,
+    discover_preferred_credential_path,
+)
 
 
 def test_agent_config_roundtrip(tmp_path: Path):
     path = tmp_path / "config.json"
     config = AgentConfig(
         hotkey="f9",
+        hotkey_vk=0x78,
+        hotkey_display="F9",
+        mode="recognize",
         microphone_device="USB Mic",
         credential_path=str(tmp_path / "credentials.json"),
+        injection_policy=INJECTION_POLICY_DIRECT_THEN_CLIPBOARD,
         render_debounce_ms=120,
+        overlay_render_fps=45,
+        overlay_font_size=15,
+        overlay_max_width=700,
+        overlay_opacity_percent=88,
+        overlay_bottom_offset=144,
+        overlay_animation_ms=180,
     )
 
     config.save(path)
@@ -56,3 +70,30 @@ def test_agent_config_load_migrates_old_default_credential_path(tmp_path: Path, 
     loaded = AgentConfig.load(config_path)
 
     assert loaded.credential_path == str(repo_cred)
+    assert loaded.hotkey_vk == 0x77
+    assert loaded.hotkey_display == "F8"
+
+
+def test_agent_config_overlay_style_payload():
+    config = AgentConfig(
+        overlay_font_size=16,
+        overlay_max_width=640,
+        overlay_opacity_percent=87,
+        overlay_bottom_offset=132,
+        overlay_animation_ms=190,
+    )
+
+    assert config.overlay_style_payload() == {
+        "font_size": "16",
+        "max_width": "640",
+        "opacity_percent": "87",
+        "bottom_offset": "132",
+        "animation_ms": "190",
+    }
+
+
+def test_agent_config_effective_hotkey_uses_vk_fields():
+    config = AgentConfig(hotkey="f8", hotkey_vk=0x41, hotkey_display="A")
+
+    assert config.effective_hotkey_vk() == 0x41
+    assert config.effective_hotkey_display() == "A"

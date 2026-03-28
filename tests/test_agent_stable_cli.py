@@ -5,15 +5,18 @@ def test_stable_cli_defaults_to_recognize():
     parser = build_arg_parser()
     args = parser.parse_args([])
 
-    assert args.mode == "inject"
+    assert getattr(args, "mode", None) is None
 
 
 def test_stable_cli_config_override():
     parser = build_arg_parser()
-    args = parser.parse_args(["--hotkey", "f9", "--render-debounce-ms", "50"])
+    args = parser.parse_args(["--mode", "recognize", "--hotkey", "f9", "--render-debounce-ms", "50"])
     config = build_config_from_args(args)
 
+    assert config.mode == "recognize"
     assert config.hotkey == "f9"
+    assert config.hotkey_vk == 0x78
+    assert config.hotkey_display == "F9"
     assert config.render_debounce_ms == 50
 
 
