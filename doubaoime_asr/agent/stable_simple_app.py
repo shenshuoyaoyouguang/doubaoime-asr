@@ -492,10 +492,13 @@ class StableVoiceInputApp:
                 self.logger.warning("inject_focus_changed")
                 self.set_status("焦点已变化，仅保留识别")
             except Exception:
-                self._session.inline_streaming_enabled = False
-                self.logger.exception("inject_inline_final_failed")
-                self.set_status("实时上屏失败，已回退为最终上屏")
-                await self._inject_final(text)
+                blocked = self._handle_inline_failure(
+                    self._session.composition,
+                    log_tag="inject_inline_final_failed",
+                    fallback_status="实时上屏失败，已回退为最终上屏",
+                )
+                if not blocked:
+                    await self._inject_final(text)
             return
         try:
             result = await self.injection_manager.inject_text(self._session.target, text)
@@ -525,6 +528,38 @@ class StableVoiceInputApp:
             and not target.is_terminal
         )
 
+    def _handle_inline_focus_changed(self, log_tag: str) -> None:
+        if self._session is None:
+            return
+        self._session.inline_streaming_enabled = False
+        self._session.final_injection_blocked = True
+        self._session.target = None
+        self.logger.warning(log_tag)
+        self.set_status("焦点已变化，仅保留识别")
+
+    def _handle_inline_failure(
+        self,
+        composition: CompositionSession | None,
+        *,
+        log_tag: str,
+        fallback_status: str | None = None,
+        blocked_status: str = "实时上屏失败，仅保留识别",
+    ) -> bool:
+        if self._session is None:
+            return True
+        self._session.inline_streaming_enabled = False
+        composed_text_exists = bool(
+            composition is not None and (composition.rendered_text or composition.final_text)
+        )
+        if composed_text_exists:
+            self._session.final_injection_blocked = True
+            self._session.target = None
+            self.set_status(blocked_status)
+        elif fallback_status:
+            self.set_status(fallback_status)
+        self.logger.exception(log_tag)
+        return composed_text_exists
+
     async def _apply_inline_interim(self, text: str) -> None:
         if self._session is None or not self._session.inline_streaming_enabled:
             return
@@ -536,14 +571,9 @@ class StableVoiceInputApp:
         try:
             composition.render_interim(text)
         except FocusChangedError:
-            self._session.inline_streaming_enabled = False
-            self._session.final_injection_blocked = True
-            self._session.target = None
-            self.logger.warning("inline_streaming_focus_changed")
-            self.set_status("焦点已变化，仅保留识别")
+            self._handle_inline_focus_changed("inline_streaming_focus_changed")
         except Exception:
-            self._session.inline_streaming_enabled = False
-            self.logger.exception("inline_streaming_failed")
+            self._handle_inline_failure(composition, log_tag="inline_streaming_failed")
 
     async def _prepare_final_text(self, text: str) -> None:
         if self._session is None or not self._session.inline_streaming_enabled:
@@ -556,14 +586,13 @@ class StableVoiceInputApp:
         try:
             composition.finalize(text)
         except FocusChangedError:
-            self._session.inline_streaming_enabled = False
-            self._session.final_injection_blocked = True
-            self._session.target = None
-            self.logger.warning("inline_final_focus_changed")
-            self.set_status("焦点已变化，仅保留识别")
+            self._handle_inline_focus_changed("inline_final_focus_changed")
         except Exception:
-            self._session.inline_streaming_enabled = False
-            self.logger.exception("inline_final_prepare_failed")
+            self._handle_inline_failure(
+                composition,
+                log_tag="inline_final_prepare_failed",
+                fallback_status="实时上屏失败，已回退为最终上屏",
+            )
 
     def _status_for_final_result(self, result: PolishResult, raw_text: str) -> str:
         if result.applied_mode != "raw_fallback":

@@ -117,6 +117,24 @@ class _DummyCaptureOutputGuard:
         return True
 
 
+class _BrokenComposition:
+    def __init__(self, *, rendered_text: str = "", final_text: str = "", fail_on: str = "render") -> None:
+        self.rendered_text = rendered_text
+        self.final_text = final_text
+        self.fail_on = fail_on
+
+    def render_interim(self, text: str) -> None:
+        if self.fail_on == "render":
+            raise RuntimeError("inline render failed")
+        self.rendered_text = text
+
+    def finalize(self, text: str) -> None:
+        if self.fail_on == "finalize":
+            raise RuntimeError("inline finalize failed")
+        self.rendered_text = text
+        self.final_text = text
+
+
 def _build_app(monkeypatch: pytest.MonkeyPatch, config: AgentConfig | None = None) -> stable_simple_app.StableVoiceInputApp:
     monkeypatch.setattr(stable_simple_app, "setup_named_logger", lambda *args, **kwargs: logging.getLogger("stable-app-test"))
     monkeypatch.setattr(stable_simple_app, "TextInjectionManager", _DummyInjectionManager)
@@ -360,10 +378,29 @@ def test_handle_worker_interim_updates_inline_composition(monkeypatch: pytest.Mo
     assert session.composition.rendered_text == "你好啊"
 
 
-def test_inject_final_uses_inline_composition_when_available(monkeypatch: pytest.MonkeyPatch):
+def test_apply_inline_interim_blocks_final_fallback_after_inline_failure(monkeypatch: pytest.MonkeyPatch):
     config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
     app = _build_app(monkeypatch, config)
     session = _build_session(10)
+    session.active = True
+    session.mode = "inject"
+    session.target = stable_simple_app.FocusTarget(hwnd=9, is_terminal=False)
+    session.inline_streaming_enabled = True
+    session.composition = _BrokenComposition(rendered_text="hel", fail_on="render")
+    app._session = session
+
+    asyncio.run(app._apply_inline_interim("hello"))
+
+    assert session.inline_streaming_enabled is False
+    assert session.final_injection_blocked is True
+    assert session.target is None
+    assert app._status == "实时上屏失败，仅保留识别"
+
+
+def test_inject_final_uses_inline_composition_when_available(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(11)
     session.active = True
     session.mode = "inject"
     target = stable_simple_app.FocusTarget(hwnd=2, is_terminal=False)
@@ -380,6 +417,40 @@ def test_inject_final_uses_inline_composition_when_available(monkeypatch: pytest
         (target, "原文", "最终文本"),
     ]
     assert session.composition.final_text == "最终文本"
+
+
+def test_inject_final_does_not_fallback_type_when_inline_text_exists(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(12)
+    session.active = True
+    session.mode = "inject"
+    target = stable_simple_app.FocusTarget(hwnd=4, is_terminal=False)
+    session.target = target
+    session.inline_streaming_enabled = True
+    session.composition = _BrokenComposition(rendered_text="hel", fail_on="finalize")
+    app._session = session
+
+    inject_calls: list[str] = []
+
+    async def fake_inject_text(target, text: str):
+        inject_calls.append(text)
+        return SimpleNamespace(
+            method="direct",
+            target_profile="default",
+            clipboard_touched=False,
+            restored_clipboard=False,
+        )
+
+    monkeypatch.setattr(app.injection_manager, "inject_text", fake_inject_text, raising=False)
+
+    asyncio.run(app._inject_final("hello"))
+
+    assert inject_calls == []
+    assert session.inline_streaming_enabled is False
+    assert session.final_injection_blocked is True
+    assert session.target is None
+    assert app._status == "实时上屏失败，仅保留识别"
 
 
 def test_should_enable_inline_streaming_skips_terminal_targets(monkeypatch: pytest.MonkeyPatch):
