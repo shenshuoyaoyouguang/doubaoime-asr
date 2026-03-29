@@ -103,6 +103,7 @@ private:
     int height_px_ = 0;
     int x_px_ = 0;
     int y_px_ = 0;
+    int session_peak_width_px_ = 0;
     float font_size_dip_ = 12.0F;
 
     Microsoft::WRL::ComPtr<ID2D1Factory> d2d_factory_;
