@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 from datetime import datetime
 import logging
 import os
@@ -10,7 +11,7 @@ import sys
 import threading
 from typing import AsyncIterator
 
-from doubaoime_asr.asr import transcribe_realtime, ResponseType
+from doubaoime_asr.asr import ResponseType, transcribe_realtime
 from doubaoime_asr.config import ASRConfig
 
 from .config import AgentConfig
@@ -88,7 +89,7 @@ class BufferedAudioCapture:
                 return True
             if self.stop_event.is_set() and self.chunk_count > 0:
                 return True
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0.01)
         return self.chunk_count > 0
 
     def request_stop(self) -> None:
@@ -101,7 +102,7 @@ class BufferedAudioCapture:
             if self.stop_event.is_set() and self._queue.empty():
                 break
             try:
-                data = await asyncio.wait_for(self._queue.get(), timeout=0.1)
+                data = await asyncio.wait_for(self._queue.get(), timeout=0.05)
             except asyncio.TimeoutError:
                 continue
             yield data
@@ -154,7 +155,7 @@ class BufferedAudioCapture:
                 _emit_stdout("ready")
                 self.ready_event.set()
                 while not self.stop_event.is_set():
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.02)
         except Exception as exc:
             self._startup_error = exc
             self.logger.exception("microphone_open_failed")
@@ -171,48 +172,40 @@ class BufferedAudioCapture:
 
 def _start_stdin_reader(
     loop: asyncio.AbstractEventLoop,
-    capture: BufferedAudioCapture,
+    command_queue: asyncio.Queue[str],
     logger: logging.Logger,
 ) -> threading.Thread:
     def reader() -> None:
+        saw_exit = False
         try:
             for line in sys.stdin:
                 command = line.strip().upper()
-                if command == "STOP":
-                    logger.info("stdin_command=STOP")
-                    loop.call_soon_threadsafe(capture.request_stop)
+                if not command:
+                    continue
+                logger.info("stdin_command=%s", command)
+                loop.call_soon_threadsafe(command_queue.put_nowait, command)
+                if command == "EXIT":
+                    saw_exit = True
                     break
         except Exception:
             logger.exception("stdin_reader_failed")
-            loop.call_soon_threadsafe(capture.request_stop)
+            loop.call_soon_threadsafe(command_queue.put_nowait, "EXIT")
+            return
+        if not saw_exit:
+            logger.info("stdin_eof")
+            loop.call_soon_threadsafe(command_queue.put_nowait, "EXIT")
 
     thread = threading.Thread(target=reader, name="doubao-worker-stdin", daemon=True)
     thread.start()
     return thread
 
 
-async def run_worker(args: argparse.Namespace) -> int:
-    _configure_stdio_utf8()
-    log_path = build_worker_log_path(args.worker_log_path)
-    logger = setup_named_logger(f"doubaoime_asr.agent.worker.{id(log_path)}", log_path)
-
-    config = ASRConfig(
-        credential_path=args.credential_path or AgentConfig.default().credential_path
-    )
-    device = None
-    if getattr(args, "mic_device", None):
-        device = int(args.mic_device) if str(args.mic_device).isdigit() else args.mic_device
-
-    capture = BufferedAudioCapture(
-        sample_rate=config.sample_rate,
-        channels=config.channels,
-        frame_duration_ms=config.frame_duration_ms,
-        device=device,
-        logger=logger,
-    )
-    loop = asyncio.get_running_loop()
-    _start_stdin_reader(loop, capture, logger)
-
+async def _run_single_session(
+    *,
+    capture: BufferedAudioCapture,
+    config: ASRConfig,
+    logger: logging.Logger,
+) -> int:
     try:
         await capture.start()
     except OSError as exc:
@@ -225,7 +218,7 @@ async def run_worker(args: argparse.Namespace) -> int:
         return 4
 
     try:
-        buffered_ok = await capture.wait_for_prebuffer(min_frames=5, timeout_s=0.5)
+        buffered_ok = await capture.wait_for_prebuffer(min_frames=2, timeout_s=0.18)
         logger.info(
             "prebuffer_ready=%s chunks=%s bytes=%s stop_requested=%s",
             buffered_ok,
@@ -257,9 +250,86 @@ async def run_worker(args: argparse.Namespace) -> int:
         _emit_stdout("finished")
         return 0
     except Exception as exc:
-        logger.exception("worker_failed")
+        logger.exception("worker_session_failed")
         _emit_stdout("error", message=str(exc) or exc.__class__.__name__)
         return 4
     finally:
         capture.request_stop()
         await capture.wait_closed()
+
+
+async def run_worker(args: argparse.Namespace) -> int:
+    _configure_stdio_utf8()
+    log_path = build_worker_log_path(args.worker_log_path)
+    logger = setup_named_logger(f"doubaoime_asr.agent.worker.{id(log_path)}", log_path)
+
+    config = ASRConfig(
+        credential_path=args.credential_path or AgentConfig.default().credential_path
+    )
+    device = None
+    if getattr(args, "mic_device", None):
+        device = int(args.mic_device) if str(args.mic_device).isdigit() else args.mic_device
+
+    loop = asyncio.get_running_loop()
+    command_queue: asyncio.Queue[str] = asyncio.Queue()
+    stdin_thread = _start_stdin_reader(loop, command_queue, logger)
+
+    active_capture: BufferedAudioCapture | None = None
+    active_task: asyncio.Task[int] | None = None
+
+    def reset_active_state(task: asyncio.Task[int]) -> None:
+        nonlocal active_capture, active_task
+        with_context = None
+        try:
+            with_context = task.result()
+        except Exception:
+            logger.exception("worker_session_task_failed")
+        finally:
+            active_capture = None
+            active_task = None
+            logger.info("worker_session_closed result=%s", with_context)
+
+    _emit_stdout("worker_ready")
+    logger.info("worker_ready")
+
+    try:
+        while True:
+            command = await command_queue.get()
+
+            if command == "START":
+                if active_task is not None and not active_task.done():
+                    logger.info("worker_start_ignored reason=session_active")
+                    continue
+                active_capture = BufferedAudioCapture(
+                    sample_rate=config.sample_rate,
+                    channels=config.channels,
+                    frame_duration_ms=config.frame_duration_ms,
+                    device=device,
+                    logger=logger,
+                )
+                active_task = asyncio.create_task(
+                    _run_single_session(capture=active_capture, config=config, logger=logger)
+                )
+                active_task.add_done_callback(reset_active_state)
+            elif command == "STOP":
+                if active_capture is not None:
+                    active_capture.request_stop()
+            elif command == "EXIT":
+                if active_capture is not None:
+                    active_capture.request_stop()
+                if active_task is not None:
+                    with contextlib.suppress(Exception):
+                        await active_task
+                return 0
+    finally:
+        if active_capture is not None:
+            active_capture.request_stop()
+        if active_task is not None:
+            with_context = None
+            try:
+                with_context = await active_task
+            except Exception:
+                logger.exception("worker_shutdown_task_failed")
+            logger.info("worker_shutdown_result=%s", with_context)
+        if stdin_thread.is_alive():
+            stdin_thread.join(timeout=1)

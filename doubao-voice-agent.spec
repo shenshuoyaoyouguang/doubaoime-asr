@@ -1,10 +1,28 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+
+
+ROOT = Path(globals().get("SPECPATH", Path.cwd()))
+
+
+def find_overlay_binary() -> list[tuple[str, str]]:
+    candidates = [
+        ROOT / "build" / "overlay_ui" / "Release" / "overlay_ui.exe",
+        ROOT / "build" / "overlay_ui" / "RelWithDebInfo" / "overlay_ui.exe",
+        ROOT / "build" / "overlay_ui" / "MinSizeRel" / "overlay_ui.exe",
+        ROOT / "build" / "overlay_ui" / "overlay_ui.exe",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return [(str(candidate), ".")]
+    raise FileNotFoundError("overlay_ui.exe not found; run scripts/build_overlay_ui.ps1 first")
+
 
 a = Analysis(
     ['scripts\\voice_agent_entry.py'],
     pathex=[],
-    binaries=[],
+    binaries=find_overlay_binary(),
     datas=[('opus.dll', '.'), ('libgcc_s_seh-1.dll', '.'), ('libwinpthread-1.dll', '.')],
     hiddenimports=[],
     hookspath=[],

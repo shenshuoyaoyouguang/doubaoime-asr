@@ -16,7 +16,7 @@ def main(argv: list[str] | None = None) -> int:
         config = build_config_from_args(args)
         app = StableVoiceInputApp(
             config,
-            mode=args.mode,
+            mode=getattr(args, "mode", None),
             enable_tray=not args.no_tray,
             console=args.console,
         )
