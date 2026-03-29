@@ -33,6 +33,34 @@ def test_measure_audio_level_detects_nonzero_signal():
     assert worker_main._measure_audio_level(samples) > 0.0
 
 
+def test_emit_audio_level_uses_threadsafe_callback_without_loop_kwargs():
+    emitted: list[tuple[str, dict[str, object]]] = []
+
+    class _Loop:
+        def call_soon_threadsafe(self, callback, *args):
+            callback(*args)
+
+    capture = worker_main.BufferedAudioCapture(
+        sample_rate=16000,
+        channels=1,
+        frame_duration_ms=20,
+        device=None,
+        logger=logging.getLogger("worker-main-test"),
+    )
+    capture._loop = _Loop()
+
+    original_emit = worker_main._emit_stdout
+    worker_main._emit_stdout = lambda event_type, **payload: emitted.append((event_type, payload))
+    try:
+        capture._emit_audio_level((1000).to_bytes(2, "little", signed=True) * 160)
+    finally:
+        worker_main._emit_stdout = original_emit
+
+    assert emitted
+    assert emitted[-1][0] == "audio_level"
+    assert "level" in emitted[-1][1]
+
+
 def test_run_single_session_uses_safer_low_latency_prebuffer(monkeypatch):
     class _Capture:
         def __init__(self) -> None:

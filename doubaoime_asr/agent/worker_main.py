@@ -5,6 +5,7 @@ import asyncio
 from array import array
 import contextlib
 from datetime import datetime
+import functools
 import logging
 import math
 import os
@@ -159,7 +160,9 @@ class BufferedAudioCapture:
             return
         self._last_level_emit_at = now
         self._last_emitted_level = self._smoothed_level
-        self._loop.call_soon_threadsafe(_emit_stdout, "audio_level", level=round(self._smoothed_level, 4))
+        self._loop.call_soon_threadsafe(
+            functools.partial(_emit_stdout, "audio_level", level=round(self._smoothed_level, 4))
+        )
 
     async def _capture_loop(self) -> None:
         import sounddevice as sd
@@ -173,9 +176,7 @@ class BufferedAudioCapture:
             if status:
                 self.logger.info("mic_status=%s", status)
                 self._loop.call_soon_threadsafe(
-                    _emit_stdout,
-                    "status",
-                    message=f"[Mic] 状态: {status}",
+                    functools.partial(_emit_stdout, "status", message=f"[Mic] 状态: {status}")
                 )
             data = indata.tobytes()
             self.chunk_count += 1
