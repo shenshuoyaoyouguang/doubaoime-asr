@@ -40,6 +40,10 @@ public:
     using Logger = std::function<void(const std::string&)>;
 
     explicit OverlayWindow(Logger logger);
+    OverlayWindow(const OverlayWindow&) = delete;
+    OverlayWindow& operator=(const OverlayWindow&) = delete;
+    OverlayWindow(OverlayWindow&&) = delete;
+    OverlayWindow& operator=(OverlayWindow&&) = delete;
 
     bool Create(HINSTANCE instance_handle);
     int Run();

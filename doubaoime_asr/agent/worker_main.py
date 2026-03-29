@@ -176,6 +176,7 @@ def _start_stdin_reader(
     logger: logging.Logger,
 ) -> threading.Thread:
     def reader() -> None:
+        saw_exit = False
         try:
             for line in sys.stdin:
                 command = line.strip().upper()
@@ -184,9 +185,14 @@ def _start_stdin_reader(
                 logger.info("stdin_command=%s", command)
                 loop.call_soon_threadsafe(command_queue.put_nowait, command)
                 if command == "EXIT":
+                    saw_exit = True
                     break
         except Exception:
             logger.exception("stdin_reader_failed")
+            loop.call_soon_threadsafe(command_queue.put_nowait, "EXIT")
+            return
+        if not saw_exit:
+            logger.info("stdin_eof")
             loop.call_soon_threadsafe(command_queue.put_nowait, "EXIT")
 
     thread = threading.Thread(target=reader, name="doubao-worker-stdin", daemon=True)

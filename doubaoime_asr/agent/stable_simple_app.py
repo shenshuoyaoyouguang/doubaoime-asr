@@ -291,6 +291,7 @@ class StableVoiceInputApp:
                 break
             await asyncio.sleep(0.02)
 
+        await self._terminate_session_process(session)
         await self._dispose_worker()
         raise RuntimeError("worker process did not become ready")
 
@@ -455,6 +456,8 @@ class StableVoiceInputApp:
         if not self._stopping and code != 0 and not self._status.startswith("识别失败"):
             self.set_status(f"识别进程异常退出: {code}")
         await self._dispose_worker()
+        if not self._stopping:
+            self._apply_pending_listener_rebind("listener_rebind_failed_after_worker_exit")
         if not self._stopping and self._pending_worker_restart:
             self._pending_worker_restart = False
             with contextlib.suppress(Exception):
@@ -464,32 +467,43 @@ class StableVoiceInputApp:
         if self._session is None:
             return
         self._session.clear_active()
-        if self._pending_listener_rebind:
-            self._pending_listener_rebind = False
-            try:
-                self._rebind_listener(self.config.effective_hotkey_vk())
-            except Exception:
-                self.logger.exception("listener_rebind_failed_after_session")
+        self._apply_pending_listener_rebind("listener_rebind_failed_after_session")
         if self._pending_worker_restart:
             self._pending_worker_restart = False
             await self._restart_worker()
 
+    def _apply_pending_listener_rebind(self, log_tag: str) -> None:
+        if not self._pending_listener_rebind:
+            return
+        self._pending_listener_rebind = False
+        try:
+            self._rebind_listener(self.config.effective_hotkey_vk())
+        except Exception:
+            self.logger.exception(log_tag)
+
     async def _dispose_worker(self) -> None:
         if self._session is None:
             return
-        for task in (self._session.stdout_task, self._session.stderr_task, self._session.wait_task):
+        session = self._session
+        for task in (session.stdout_task, session.stderr_task):
             if task is not None and not task.done():
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+        wait_task = session.wait_task
+        if wait_task is not None and not wait_task.done():
+            if session.process.returncode is None:
+                wait_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await wait_task
+            else:
+                with contextlib.suppress(Exception):
+                    await wait_task
         self._session = None
 
-    async def _terminate_worker(self) -> None:
-        if self._session is None:
-            return
-        process = self._session.process
-        await self.overlay_scheduler.hide("terminate_worker")
-        if process.stdin is not None and process.returncode is None:
+    async def _terminate_session_process(self, session: WorkerSession) -> None:
+        process = session.process
+        if self._session is session and process.stdin is not None and process.returncode is None:
             with contextlib.suppress(Exception):
                 await self._send_worker_command("EXIT")
         try:
@@ -497,6 +511,14 @@ class StableVoiceInputApp:
         except (asyncio.TimeoutError, ProcessLookupError):
             with contextlib.suppress(ProcessLookupError):
                 process.kill()
+            with contextlib.suppress(asyncio.TimeoutError, ProcessLookupError):
+                await asyncio.wait_for(process.wait(), timeout=2)
+
+    async def _terminate_worker(self) -> None:
+        if self._session is None:
+            return
+        await self.overlay_scheduler.hide("terminate_worker")
+        await self._terminate_session_process(self._session)
         await self._dispose_worker()
 
     async def _restart_worker(self) -> None:

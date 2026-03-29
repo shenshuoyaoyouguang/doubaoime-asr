@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import queue
 import threading
@@ -145,6 +146,7 @@ class OverlayPreview:
     def _ensure_backend_started(self) -> None:
         if self._backend is not None:
             return
+        backend: OverlayPreviewCpp | None = None
         try:
             backend = OverlayPreviewCpp(logger=self._logger)
             backend.start()
@@ -154,6 +156,9 @@ class OverlayPreview:
             self._logger.info("overlay_backend=native")
         except Exception:
             self._logger.exception("overlay_native_start_failed")
+            if backend is not None:
+                with contextlib.suppress(Exception):
+                    backend.stop()
             self._activate_legacy_backend(log_message="overlay_fallback_start_failed")
 
     def _invoke(self, method: str, *args: object, **kwargs: object) -> None:

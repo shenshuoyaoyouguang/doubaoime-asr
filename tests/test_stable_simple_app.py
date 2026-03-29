@@ -3,9 +3,19 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+import sys
 from types import SimpleNamespace
+import types
 
 import pytest
+
+if "pywinauto" not in sys.modules:
+    pywinauto_stub = types.ModuleType("pywinauto")
+    pywinauto_stub.Desktop = object
+    keyboard_stub = types.ModuleType("pywinauto.keyboard")
+    keyboard_stub.send_keys = lambda *args, **kwargs: None
+    sys.modules["pywinauto"] = pywinauto_stub
+    sys.modules["pywinauto.keyboard"] = keyboard_stub
 
 from doubaoime_asr.agent import stable_simple_app
 from doubaoime_asr.agent.config import AgentConfig, INJECTION_POLICY_DIRECT_ONLY
@@ -83,6 +93,96 @@ def test_handle_worker_exit_ignores_stale_session(monkeypatch: pytest.MonkeyPatc
 
     assert app._session is current_session
     assert app._status == "\u7a7a\u95f2"
+
+
+def test_ensure_worker_timeout_terminates_process_before_dispose(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    process = SimpleNamespace(returncode=None, stdout=None, stderr=None, stdin=None)
+    terminated_sessions: list[stable_simple_app.WorkerSession] = []
+
+    async def fake_spawn_worker():
+        return process
+
+    async def fake_reader(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    async def fake_wait_worker(*args, **kwargs):
+        while process.returncode is None:
+            await asyncio.sleep(0.01)
+
+    async def fake_terminate_session_process(session: stable_simple_app.WorkerSession) -> None:
+        terminated_sessions.append(session)
+        process.returncode = 9
+
+    monkeypatch.setattr(app, "_spawn_worker", fake_spawn_worker)
+    monkeypatch.setattr(app, "_read_worker_stdout", fake_reader)
+    monkeypatch.setattr(app, "_read_worker_stderr", fake_reader)
+    monkeypatch.setattr(app, "_wait_worker", fake_wait_worker)
+    monkeypatch.setattr(app, "_terminate_session_process", fake_terminate_session_process)
+
+    with pytest.raises(RuntimeError, match="did not become ready"):
+        asyncio.run(app._ensure_worker())
+
+    assert len(terminated_sessions) == 1
+    assert app._session is None
+
+
+def test_terminate_worker_waits_for_killed_process(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    session = _build_session(11)
+    wait_for_calls: list[int] = []
+    sent_commands: list[str] = []
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stdin = object()
+            self.returncode = None
+            self.kill_calls = 0
+
+        async def wait(self) -> int:
+            return int(self.returncode or 0)
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+            self.returncode = 9
+
+    process = _FakeProcess()
+    session.process = process
+    app._session = session
+
+    async def fake_send_worker_command(command: str) -> None:
+        sent_commands.append(command)
+
+    async def fake_wait_for(awaitable, timeout):
+        wait_for_calls.append(timeout)
+        if len(wait_for_calls) == 1:
+            awaitable.close()
+            raise asyncio.TimeoutError
+        return await awaitable
+
+    monkeypatch.setattr(app, "_send_worker_command", fake_send_worker_command)
+    monkeypatch.setattr(stable_simple_app.asyncio, "wait_for", fake_wait_for)
+
+    asyncio.run(app._terminate_worker())
+
+    assert sent_commands == ["EXIT"]
+    assert process.kill_calls == 1
+    assert wait_for_calls == [2, 2]
+    assert app._session is None
+
+
+def test_handle_worker_exit_applies_pending_listener_rebind(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    session = _build_session(12)
+    app._session = session
+    app._pending_listener_rebind = True
+    rebind_calls: list[int] = []
+    monkeypatch.setattr(app, "_rebind_listener", lambda hotkey_vk: rebind_calls.append(hotkey_vk))
+
+    asyncio.run(app._handle_worker_exit(12, 1))
+
+    assert rebind_calls == [app.config.effective_hotkey_vk()]
+    assert app._pending_listener_rebind is False
 
 
 def test_apply_config_rolls_back_runtime_changes_after_save_failure(monkeypatch: pytest.MonkeyPatch):
