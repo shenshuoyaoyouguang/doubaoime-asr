@@ -343,12 +343,18 @@ def test_handle_worker_final_uses_polished_text(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(app, "_inject_final", fake_inject)
 
-    asyncio.run(app._handle_worker_event(3, {"type": "final", "text": "原文"}))
+    asyncio.run(app._handle_worker_event(3, {"type": "final", "text": "原文", "segment_index": 0}))
+
+    assert injected == []
+    assert app.overlay_scheduler.calls == [("final", ("原文", "final_raw"))]
+
+    asyncio.run(app._handle_worker_event(3, {"type": "finished"}))
 
     assert injected == ["润色后的文本。"]
     assert app.overlay_scheduler.calls == [
         ("final", ("原文", "final_raw")),
         ("final", ("润色后的文本。", "final_committed")),
+        ("hide", ("finished",)),
     ]
     assert app._status == "最终结果: 润色后的文本。"
 
@@ -369,9 +375,13 @@ def test_handle_worker_final_fallback_status_uses_raw_text(monkeypatch: pytest.M
 
     monkeypatch.setattr(app, "_inject_final", lambda text: asyncio.sleep(0))
 
-    asyncio.run(app._handle_worker_event(4, {"type": "final", "text": "原始识别文本"}))
+    asyncio.run(app._handle_worker_event(4, {"type": "final", "text": "原始识别文本", "segment_index": 0}))
+    asyncio.run(app._handle_worker_event(4, {"type": "finished"}))
 
-    assert app.overlay_scheduler.calls == [("final", ("原始识别文本", "final_raw"))]
+    assert app.overlay_scheduler.calls == [
+        ("final", ("原始识别文本", "final_raw")),
+        ("hide", ("finished",)),
+    ]
     assert app._status == "润色超时，已使用原文: 原始识别文本"
 
 
@@ -387,11 +397,72 @@ def test_handle_worker_interim_updates_inline_composition(monkeypatch: pytest.Mo
     session.composition = stable_simple_app.CompositionSession(app.injection_manager.injector, target)
     app._session = session
 
-    asyncio.run(app._handle_worker_event(9, {"type": "interim", "text": "你好啊"}))
+    asyncio.run(app._handle_worker_event(9, {"type": "interim", "text": "你好啊", "segment_index": 0}))
 
     assert app.overlay_scheduler.calls == [("interim", ("你好啊",))]
     assert app.injection_manager.injector.calls == [(target, "", "你好啊")]
     assert session.composition.rendered_text == "你好啊"
+
+
+def test_handle_worker_interim_keeps_previous_final_segments(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(91)
+    session.active = True
+    session.mode = "inject"
+    target = stable_simple_app.FocusTarget(hwnd=7, is_terminal=False)
+    session.target = target
+    session.inline_streaming_enabled = True
+    session.composition = stable_simple_app.CompositionSession(app.injection_manager.injector, target)
+    app._session = session
+
+    asyncio.run(app._handle_worker_event(91, {"type": "final", "text": "第一句。", "segment_index": 0}))
+    asyncio.run(app._handle_worker_event(91, {"type": "interim", "text": "第二", "segment_index": 1}))
+
+    assert app.injection_manager.injector.calls == [
+        (target, "", "第一句。"),
+        (target, "第一句。", "第一句。第二"),
+    ]
+    assert session.composition.rendered_text == "第一句。第二"
+
+
+def test_handle_worker_finished_injects_aggregated_text_once(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="inject")
+    app = _build_app(monkeypatch, config)
+    session = _build_session(92)
+    session.active = True
+    session.mode = "inject"
+    session.target = stable_simple_app.FocusTarget(hwnd=8, is_terminal=False)
+    app._session = session
+
+    injected: list[str] = []
+
+    async def fake_inject_text(target, text: str):
+        injected.append(text)
+        return SimpleNamespace(
+            method="direct",
+            target_profile="editor",
+            clipboard_touched=False,
+            restored_clipboard=False,
+        )
+
+    monkeypatch.setattr(app.injection_manager, "inject_text", fake_inject_text, raising=False)
+
+    asyncio.run(app._handle_worker_event(92, {"type": "final", "text": "第一句。", "segment_index": 0}))
+    asyncio.run(app._handle_worker_event(92, {"type": "interim", "text": "第二", "segment_index": 1}))
+    asyncio.run(app._handle_worker_event(92, {"type": "final", "text": "第二句。", "segment_index": 1}))
+
+    assert injected == []
+
+    asyncio.run(app._handle_worker_event(92, {"type": "finished"}))
+
+    assert injected == ["第一句。第二句。"]
+    assert app.overlay_scheduler.calls == [
+        ("final", ("第一句。", "final_raw")),
+        ("interim", ("第一句。第二",)),
+        ("final", ("第一句。第二句。", "final_raw")),
+        ("hide", ("finished",)),
+    ]
 
 
 def test_apply_inline_interim_blocks_final_fallback_after_inline_failure(monkeypatch: pytest.MonkeyPatch):
@@ -498,7 +569,7 @@ def test_handle_press_activates_capture_output(monkeypatch: pytest.MonkeyPatch):
     assert commands == ["START"]
     assert app.capture_output_guard.activate_calls == 1
     assert app.overlay_scheduler.calls == [("microphone", ())]
-    assert app._status == "启动识别中…"
+    assert app._status == "启动识别中（仅识别，不自动上屏）…"
 
 
 def test_handle_press_releases_capture_output_when_start_fails(monkeypatch: pytest.MonkeyPatch):

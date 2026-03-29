@@ -31,6 +31,15 @@ def _emit_stdout(event_type: str, **payload) -> None:
     print(encode_event(event_type, **payload), flush=True)
 
 
+def _response_segment_index(response) -> int | None:
+    if not getattr(response, "results", None):
+        return None
+    indexes = [result.index for result in response.results]
+    if not indexes:
+        return None
+    return max(indexes)
+
+
 def build_worker_log_path(path_arg: str | None = None) -> Path:
     if path_arg:
         return Path(path_arg)
@@ -240,9 +249,17 @@ async def _run_single_session(
             elif response.type == ResponseType.SESSION_STARTED:
                 _emit_stdout("status", message="会话已启动，开始说话…")
             elif response.type == ResponseType.INTERIM_RESULT and response.text:
-                _emit_stdout("interim", text=response.text)
+                _emit_stdout(
+                    "interim",
+                    text=response.text,
+                    segment_index=_response_segment_index(response),
+                )
             elif response.type == ResponseType.FINAL_RESULT:
-                _emit_stdout("final", text=response.text)
+                _emit_stdout(
+                    "final",
+                    text=response.text,
+                    segment_index=_response_segment_index(response),
+                )
             elif response.type == ResponseType.ERROR:
                 _emit_stdout("error", message=response.error_msg or "语音识别失败")
                 return 3

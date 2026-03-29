@@ -26,7 +26,7 @@ from .win_keyboard_hook import SingleKeyRecorder, VK_RCONTROL
 
 MODE_OPTIONS: list[tuple[str, str]] = [
     ("inject", "自动上屏"),
-    ("recognize", "仅识别"),
+    ("recognize", "仅识别（不自动上屏）"),
 ]
 
 INJECTION_POLICY_OPTIONS: list[tuple[str, str]] = [

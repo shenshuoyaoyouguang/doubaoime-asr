@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
@@ -37,6 +37,7 @@ from .win_privileges import is_current_process_elevated, restart_as_admin
 
 Mode = Literal["recognize", "inject"]
 FOREGROUND_POLL_INTERVAL_S = 0.5
+RECOGNIZE_ONLY_STATUS = "启动识别中（仅识别，不自动上屏）…"
 
 
 @dataclass(slots=True)
@@ -57,6 +58,10 @@ class WorkerSession:
     composition: CompositionSession | None = None
     inline_streaming_enabled: bool = False
     final_injection_blocked: bool = False
+    segment_texts: dict[int, str] = field(default_factory=dict)
+    finalized_segment_indexes: set[int] = field(default_factory=set)
+    active_segment_index: int | None = None
+    last_displayed_raw_final_text: str = ""
 
     def begin(
         self,
@@ -76,6 +81,10 @@ class WorkerSession:
         self.composition = composition
         self.inline_streaming_enabled = inline_streaming_enabled
         self.final_injection_blocked = False
+        self.segment_texts.clear()
+        self.finalized_segment_indexes.clear()
+        self.active_segment_index = None
+        self.last_displayed_raw_final_text = ""
 
     def clear_active(self) -> None:
         self.active = False
@@ -88,6 +97,10 @@ class WorkerSession:
         self.composition = None
         self.inline_streaming_enabled = False
         self.final_injection_blocked = False
+        self.segment_texts.clear()
+        self.finalized_segment_indexes.clear()
+        self.active_segment_index = None
+        self.last_displayed_raw_final_text = ""
 
 
 class StableVoiceInputApp:
@@ -176,7 +189,7 @@ class StableVoiceInputApp:
             print("=" * 50)
             print("豆包语音输入 - 全局版")
             print("=" * 50)
-            print(f"模式: {self.mode}")
+            print(f"模式: {self._mode_display_label()}")
             print(f"热键: {self.config.effective_hotkey_display()}")
             print("使用方式：按住热键说话，松开结束。")
             print("按 Ctrl+C 退出。")
@@ -284,6 +297,8 @@ class StableVoiceInputApp:
             if self._should_enable_inline_streaming(target):
                 composition = CompositionSession(self.injection_manager.injector, target)
                 inline_streaming_enabled = True
+        else:
+            self.logger.info("inject_skipped reason=recognize_mode phase=session_start")
 
         session.begin(
             target,
@@ -303,7 +318,7 @@ class StableVoiceInputApp:
             return
         # 显示麦克风界面（而非隐藏 overlay）
         await self.overlay_scheduler.show_microphone()
-        self.set_status(capture_output_warning or "启动识别中…")
+        self.set_status(self._session_start_status(capture_output_warning))
 
     async def _handle_release(self) -> None:
         self.logger.info("hotkey_up")
@@ -473,6 +488,7 @@ class StableVoiceInputApp:
         elif event_type == "interim":
             text = str(event.get("text", ""))
             if text and session.active:
+                text = self._record_session_text(session, event, text, is_final=False)
                 if self.console:
                     print(f"\r[识别中] {text}", end="", flush=True)
                 await self.overlay_scheduler.submit_interim(text)
@@ -480,29 +496,42 @@ class StableVoiceInputApp:
                 self.set_status(f"识别中: {text[-24:]}")
         elif event_type == "final":
             raw_text = str(event.get("text", ""))
-            if raw_text:
+            if raw_text and session.active:
+                raw_text = self._record_session_text(session, event, raw_text, is_final=True)
+                session.last_displayed_raw_final_text = raw_text
                 await self.overlay_scheduler.submit_final(raw_text, kind="final_raw")
                 await self._prepare_final_text(raw_text)
-            result = await self._resolve_final_text(raw_text)
-            if result.text and result.text != raw_text:
-                await self.overlay_scheduler.submit_final(result.text, kind="final_committed")
-            self.set_status(self._status_for_final_result(result, raw_text))
-            if self.console:
-                print(f"\r[最终] {result.text}          ", flush=True)
-            await self._inject_final(result.text)
+                if not session.stop_sent:
+                    self.set_status(f"识别中: {raw_text[-24:]}")
         elif event_type == "error":
             await self.overlay_scheduler.hide("error")
             message = str(event.get("message", "语音识别失败"))
             self.set_status(f"识别失败: {message}")
             await self._clear_active_session()
         elif event_type == "finished":
+            raw_text = self._aggregate_session_text(session)
+            if raw_text:
+                if raw_text != session.last_displayed_raw_final_text:
+                    await self.overlay_scheduler.submit_final(raw_text, kind="final_raw")
+                    session.last_displayed_raw_final_text = raw_text
+                result = await self._resolve_final_text(raw_text)
+                if result.text and result.text != raw_text:
+                    await self.overlay_scheduler.submit_final(result.text, kind="final_committed")
+                self.set_status(self._status_for_final_result(result, raw_text))
+                if self.console:
+                    print(f"\r[最终] {result.text}          ", flush=True)
+                await self._inject_final(result.text)
             await self.overlay_scheduler.hide("finished")
-            if not self._status.startswith("识别失败"):
+            if not raw_text and not self._status.startswith("识别失败"):
                 self.set_status("空闲")
             await self._clear_active_session()
 
     async def _inject_final(self, text: str) -> None:
-        if self._session is None or self._session.mode != "inject":
+        if self._session is None:
+            return
+        if self._session.mode != "inject":
+            if text:
+                self.logger.info("inject_skipped reason=recognize_mode text_length=%s", len(text))
             return
         if self._session.target is None or self._session.final_injection_blocked:
             return
@@ -555,6 +584,88 @@ class StableVoiceInputApp:
             and self.config.streaming_text_mode == STREAMING_TEXT_MODE_SAFE_INLINE
             and not target.is_terminal
         )
+
+    def _mode_display_label(self, mode: Mode | None = None) -> str:
+        resolved = mode or self.mode
+        if resolved == "inject":
+            return "自动上屏"
+        return "仅识别（不自动上屏）"
+
+    def _session_start_status(self, capture_output_warning: str | None) -> str:
+        if capture_output_warning is not None:
+            return capture_output_warning
+        if self.mode == "inject":
+            return "启动识别中…"
+        return RECOGNIZE_ONLY_STATUS
+
+    def _event_segment_index(self, event: dict[str, object]) -> int | None:
+        raw_index = event.get("segment_index")
+        if raw_index is None:
+            return None
+        try:
+            return int(raw_index)
+        except (TypeError, ValueError):
+            return None
+
+    def _next_segment_index(self, session: WorkerSession) -> int:
+        if not session.segment_texts:
+            return 0
+        return max(session.segment_texts) + 1
+
+    def _resolve_segment_index(self, session: WorkerSession, event: dict[str, object], *, is_final: bool) -> int:
+        index = self._event_segment_index(event)
+        if index is None:
+            index = session.active_segment_index if session.active_segment_index is not None else self._next_segment_index(session)
+        if is_final:
+            session.finalized_segment_indexes.add(index)
+            if session.active_segment_index == index:
+                session.active_segment_index = None
+        else:
+            session.active_segment_index = index
+        return index
+
+    def _record_session_text(
+        self,
+        session: WorkerSession,
+        event: dict[str, object],
+        text: str,
+        *,
+        is_final: bool,
+    ) -> str:
+        index = self._resolve_segment_index(session, event, is_final=is_final)
+        session.segment_texts[index] = text
+        return self._aggregate_session_text(session)
+
+    def _aggregate_session_text(self, session: WorkerSession) -> str:
+        text = ""
+        for _, segment in sorted(session.segment_texts.items()):
+            if not segment:
+                continue
+            text = self._concat_transcript_text(text, segment)
+        return text
+
+    def _concat_transcript_text(self, current: str, incoming: str) -> str:
+        if not current:
+            return incoming
+        if not incoming:
+            return current
+        if incoming.startswith(current):
+            return incoming
+        if current.endswith(incoming):
+            return current
+        overlap = self._suffix_prefix_overlap(current, incoming)
+        if overlap > 0:
+            return current + incoming[overlap:]
+        if current[-1].isascii() and current[-1].isalnum() and incoming[0].isascii() and incoming[0].isalnum():
+            return f"{current} {incoming}"
+        return current + incoming
+
+    def _suffix_prefix_overlap(self, left: str, right: str) -> int:
+        max_overlap = min(len(left), len(right))
+        for size in range(max_overlap, 0, -1):
+            if left[-size:] == right[:size]:
+                return size
+        return 0
 
     def _handle_inline_focus_changed(self, log_tag: str) -> None:
         if self._session is None:
@@ -1030,7 +1141,7 @@ class StableVoiceInputApp:
             "Doubao Voice Input",
             menu=pystray.Menu(
                 pystray.MenuItem(lambda item: f"状态: {self._status}", None, enabled=False),
-                pystray.MenuItem(lambda item: f"模式: {self.mode}", None, enabled=False),
+                pystray.MenuItem(lambda item: f"模式: {self._mode_display_label()}", None, enabled=False),
                 pystray.MenuItem(lambda item: f"热键: {self.config.effective_hotkey_display()}", None, enabled=False),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("以管理员重启", restart_app_as_admin, enabled=lambda item: not self._process_elevated),
