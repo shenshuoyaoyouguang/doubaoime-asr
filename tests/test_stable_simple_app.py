@@ -18,7 +18,12 @@ if "pywinauto" not in sys.modules:
     sys.modules["pywinauto.keyboard"] = keyboard_stub
 
 from doubaoime_asr.agent import stable_simple_app
-from doubaoime_asr.agent.config import AgentConfig, INJECTION_POLICY_DIRECT_ONLY, POLISH_MODE_OLLAMA
+from doubaoime_asr.agent.config import (
+    AgentConfig,
+    CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT,
+    INJECTION_POLICY_DIRECT_ONLY,
+    POLISH_MODE_OLLAMA,
+)
 from doubaoime_asr.agent.text_polisher import PolishResult
 
 
@@ -79,12 +84,32 @@ class _DummyPolisher:
         return True
 
 
+class _DummyCaptureOutputGuard:
+    def __init__(self, logger, *, policy: str) -> None:
+        self.logger = logger
+        self.policy = policy
+        self.activate_calls = 0
+        self.release_calls = 0
+
+    def configure(self, policy: str) -> None:
+        self.policy = policy
+
+    def activate(self) -> bool:
+        self.activate_calls += 1
+        return True
+
+    def release(self) -> bool:
+        self.release_calls += 1
+        return True
+
+
 def _build_app(monkeypatch: pytest.MonkeyPatch, config: AgentConfig | None = None) -> stable_simple_app.StableVoiceInputApp:
     monkeypatch.setattr(stable_simple_app, "setup_named_logger", lambda *args, **kwargs: logging.getLogger("stable-app-test"))
     monkeypatch.setattr(stable_simple_app, "TextInjectionManager", _DummyInjectionManager)
     monkeypatch.setattr(stable_simple_app, "OverlayPreview", _DummyPreview)
     monkeypatch.setattr(stable_simple_app, "OverlayRenderScheduler", _DummyScheduler)
     monkeypatch.setattr(stable_simple_app, "TextPolisher", _DummyPolisher)
+    monkeypatch.setattr(stable_simple_app, "SystemOutputMuteGuard", _DummyCaptureOutputGuard)
     return stable_simple_app.StableVoiceInputApp(config or AgentConfig(), enable_tray=False)
 
 
@@ -295,3 +320,78 @@ def test_handle_worker_final_fallback_status_uses_raw_text(monkeypatch: pytest.M
     asyncio.run(app._handle_worker_event(4, {"type": "final", "text": "原始识别文本"}))
 
     assert app._status == "润色超时，已使用原文: 原始识别文本"
+
+
+def test_handle_press_activates_capture_output(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="recognize", capture_output_policy=CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(5)
+
+    async def fake_ensure_worker() -> stable_simple_app.WorkerSession:
+        return session
+
+    commands: list[str] = []
+
+    async def fake_send_worker_command(command: str) -> None:
+        commands.append(command)
+
+    monkeypatch.setattr(app, "_ensure_worker", fake_ensure_worker)
+    monkeypatch.setattr(app, "_send_worker_command", fake_send_worker_command)
+
+    asyncio.run(app._handle_press())
+
+    assert commands == ["START"]
+    assert app.capture_output_guard.activate_calls == 1
+    assert app._status == "启动识别中…"
+
+
+def test_handle_press_releases_capture_output_when_start_fails(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="recognize", capture_output_policy=CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(6)
+
+    async def fake_ensure_worker() -> stable_simple_app.WorkerSession:
+        return session
+
+    async def fake_send_worker_command(command: str) -> None:
+        raise RuntimeError("boom")
+
+    restart_calls: list[bool] = []
+
+    async def fake_restart_worker() -> None:
+        restart_calls.append(True)
+
+    monkeypatch.setattr(app, "_ensure_worker", fake_ensure_worker)
+    monkeypatch.setattr(app, "_send_worker_command", fake_send_worker_command)
+    monkeypatch.setattr(app, "_restart_worker", fake_restart_worker)
+
+    asyncio.run(app._handle_press())
+
+    assert app.capture_output_guard.activate_calls == 1
+    assert app.capture_output_guard.release_calls == 1
+    assert restart_calls == [True]
+    assert app._status == "启动识别失败，请查看 controller.log"
+
+
+def test_clear_active_session_releases_capture_output(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="recognize", capture_output_policy=CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(7)
+    session.active = True
+    app._session = session
+
+    asyncio.run(app._clear_active_session())
+
+    assert session.active is False
+    assert app.capture_output_guard.release_calls == 1
+
+
+def test_handle_worker_exit_releases_capture_output(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="recognize", capture_output_policy=CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(8)
+    app._session = session
+
+    asyncio.run(app._handle_worker_exit(8, 1))
+
+    assert app.capture_output_guard.release_calls == 1

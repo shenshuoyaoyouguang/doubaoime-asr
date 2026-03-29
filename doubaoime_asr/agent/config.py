@@ -24,6 +24,12 @@ SUPPORTED_POLISH_MODES = (
     POLISH_MODE_LIGHT,
     POLISH_MODE_OLLAMA,
 )
+CAPTURE_OUTPUT_POLICY_OFF = "off"
+CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT = "mute_system_output"
+SUPPORTED_CAPTURE_OUTPUT_POLICIES = (
+    CAPTURE_OUTPUT_POLICY_OFF,
+    CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT,
+)
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 DEFAULT_OLLAMA_MODEL = "qwen35-opus-fixed:latest"
 DEFAULT_OLLAMA_KEEP_ALIVE = "15m"
@@ -84,6 +90,7 @@ class AgentConfig:
     microphone_device: int | str | None = None
     credential_path: str | None = None
     injection_policy: str = INJECTION_POLICY_DIRECT_THEN_CLIPBOARD
+    capture_output_policy: str = CAPTURE_OUTPUT_POLICY_OFF
     render_debounce_ms: int = 80
     overlay_render_fps: int = 30
     overlay_font_size: int = 14
@@ -172,6 +179,11 @@ class AgentConfig:
             data.get("injection_policy")
             if data.get("injection_policy") in SUPPORTED_INJECTION_POLICIES
             else base.injection_policy
+        )
+        data["capture_output_policy"] = (
+            data.get("capture_output_policy")
+            if data.get("capture_output_policy") in SUPPORTED_CAPTURE_OUTPUT_POLICIES
+            else base.capture_output_policy
         )
         data["polish_mode"] = (
             data.get("polish_mode")

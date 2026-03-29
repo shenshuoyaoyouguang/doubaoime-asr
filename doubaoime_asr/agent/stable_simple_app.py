@@ -11,7 +11,13 @@ import sys
 import threading
 from typing import Literal
 
-from .config import AgentConfig, POLISH_MODE_OLLAMA, SUPPORTED_INJECTION_POLICIES, SUPPORTED_POLISH_MODES
+from .config import (
+    AgentConfig,
+    POLISH_MODE_OLLAMA,
+    SUPPORTED_CAPTURE_OUTPUT_POLICIES,
+    SUPPORTED_INJECTION_POLICIES,
+    SUPPORTED_POLISH_MODES,
+)
 from .injection_manager import TextInjectionManager
 from .input_injector import FocusChangedError, FocusTarget
 from .overlay_preview import OverlayPreview
@@ -20,6 +26,7 @@ from .protocol import decode_event
 from .runtime_logging import setup_named_logger
 from .settings_window import SettingsWindowController
 from .text_polisher import PolishResult, TextPolisher
+from .win_audio_output import AudioOutputMuteError, SystemOutputMuteGuard
 from .win_keyboard_hook import GlobalHotkeyHook
 from .win_hotkey import normalize_hotkey, vk_from_hotkey, vk_to_display, vk_to_hotkey
 
@@ -89,6 +96,10 @@ class StableVoiceInputApp:
             fps=self.config.overlay_render_fps,
         )
         self.text_polisher = TextPolisher(self.logger, self.config)
+        self.capture_output_guard = SystemOutputMuteGuard(
+            self.logger,
+            policy=self.config.capture_output_policy,
+        )
 
         self._status = "空闲"
         self._status_lock = threading.Lock()
@@ -227,16 +238,18 @@ class StableVoiceInputApp:
             self.logger.info("captured_target hwnd=%s focus_hwnd=%s", target.hwnd, target.focus_hwnd)
 
         session.begin(target, self.mode)
+        capture_output_warning = self._activate_capture_output()
         try:
             await self._send_worker_command("START")
         except Exception:
             session.clear_active()
+            restore_warning = self._release_capture_output()
             self.logger.exception("worker_start_command_failed")
-            self.set_status("启动识别失败，请查看 controller.log")
+            self.set_status(restore_warning or "启动识别失败，请查看 controller.log")
             await self._restart_worker()
             return
         await self.overlay_scheduler.hide("session_start")
-        self.set_status("启动识别中…")
+        self.set_status(capture_output_warning or "启动识别中…")
 
     async def _handle_release(self) -> None:
         self.logger.info("hotkey_up")
@@ -481,6 +494,9 @@ class StableVoiceInputApp:
         self.logger.info("worker_exit code=%s", code)
         if not self._stopping and code != 0 and not self._status.startswith("识别失败"):
             self.set_status(f"识别进程异常退出: {code}")
+        restore_warning = self._release_capture_output()
+        if restore_warning is not None:
+            self.set_status(restore_warning)
         await self._dispose_worker()
         if not self._stopping:
             self._apply_pending_listener_rebind("listener_rebind_failed_after_worker_exit")
@@ -493,6 +509,9 @@ class StableVoiceInputApp:
         if self._session is None:
             return
         self._session.clear_active()
+        restore_warning = self._release_capture_output()
+        if restore_warning is not None:
+            self.set_status(restore_warning)
         self._apply_pending_listener_rebind("listener_rebind_failed_after_session")
         if self._pending_worker_restart:
             self._pending_worker_restart = False
@@ -547,6 +566,9 @@ class StableVoiceInputApp:
         if self._session is None:
             return
         await self.overlay_scheduler.hide("terminate_worker")
+        restore_warning = self._release_capture_output()
+        if restore_warning is not None and not self._stopping:
+            self.set_status(restore_warning)
         await self._terminate_session_process(self._session)
         await self._dispose_worker()
 
@@ -633,6 +655,7 @@ class StableVoiceInputApp:
             self.preview.configure(new_config)
             self.overlay_scheduler.configure(new_config)
             self.text_polisher.configure(new_config)
+            self.capture_output_guard.configure(new_config.capture_output_policy)
 
             if hotkey_changed:
                 if session_active:
@@ -665,6 +688,7 @@ class StableVoiceInputApp:
             self.preview.configure(old_config)
             self.overlay_scheduler.configure(old_config)
             self.text_polisher.configure(old_config)
+            self.capture_output_guard.configure(old_config.capture_output_policy)
             if listener_rebound:
                 try:
                     self._rebind_listener(old_config.effective_hotkey_vk())
@@ -712,6 +736,22 @@ class StableVoiceInputApp:
                 old_config.ollama_prompt_template != new_config.ollama_prompt_template,
             )
         )
+
+    def _activate_capture_output(self) -> str | None:
+        try:
+            self.capture_output_guard.activate()
+        except AudioOutputMuteError:
+            self.logger.exception("capture_output_activate_failed")
+            return "启动识别中…（自动静音失败，请查看 controller.log）"
+        return None
+
+    def _release_capture_output(self) -> str | None:
+        try:
+            self.capture_output_guard.release()
+        except AudioOutputMuteError:
+            self.logger.exception("capture_output_release_failed")
+            return "恢复系统输出失败，请查看 controller.log"
+        return None
 
     def _start_tray(self, loop: asyncio.AbstractEventLoop) -> None:
         import pystray
@@ -775,6 +815,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="direct_only 仅直接输入；direct_then_clipboard 失败时允许剪贴板回退",
     )
     parser.add_argument(
+        "--capture-output-policy",
+        choices=SUPPORTED_CAPTURE_OUTPUT_POLICIES,
+        default=argparse.SUPPRESS,
+        help="off 保持现状；mute_system_output 在录音期间静音系统输出",
+    )
+    parser.add_argument(
         "--polish-mode",
         choices=SUPPORTED_POLISH_MODES,
         default=argparse.SUPPRESS,
@@ -815,6 +861,8 @@ def build_config_from_args(args: argparse.Namespace | None = None) -> AgentConfi
         config.credential_path = args.credential_path
     if getattr(args, "injection_policy", None):
         config.injection_policy = args.injection_policy
+    if getattr(args, "capture_output_policy", None):
+        config.capture_output_policy = args.capture_output_policy
     if getattr(args, "polish_mode", None):
         config.polish_mode = args.polish_mode
     if getattr(args, "ollama_base_url", None):
