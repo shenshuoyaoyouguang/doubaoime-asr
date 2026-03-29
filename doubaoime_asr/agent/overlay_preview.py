@@ -185,6 +185,11 @@ class OverlayPreview:
         self._ensure_backend_started()
         if self._backend is None:
             return
+        if self._using_legacy and method == "show":
+            text = str(args[0]) if args else str(kwargs.get("text", ""))
+            kind = str(kwargs.get("kind", "interim"))
+            if kind == "microphone" and not text:
+                return
         try:
             getattr(self._backend, method)(*args, **kwargs)
         except Exception:

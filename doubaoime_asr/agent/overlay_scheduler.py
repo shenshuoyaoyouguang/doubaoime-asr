@@ -83,6 +83,15 @@ class OverlayRenderScheduler:
         )
         await self._submit(frame)
 
+    async def show_microphone(self) -> None:
+        """显示麦克风模式界面（按住热键时的空状态）"""
+        frame = OverlayFrame(
+            text="",  # 空文字
+            kind="microphone",  # 麦克风模式
+            stable_prefix_utf16_len=0,
+        )
+        await self._submit(frame)
+
     async def hide(self, reason: str = "") -> None:
         self._pending_frame = None
         if self._task is not None and not self._task.done():

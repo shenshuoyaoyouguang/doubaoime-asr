@@ -62,3 +62,14 @@ async def test_overlay_scheduler_hide_clears_pending():
     await scheduler.hide("finished")
 
     assert preview.calls[-1] == ("hide", ("finished",))
+
+
+@pytest.mark.asyncio
+async def test_overlay_scheduler_flushes_microphone_placeholder():
+    preview = _Preview()
+    scheduler = OverlayRenderScheduler(preview, logger=logging.getLogger("overlay-scheduler"), fps=30)
+
+    await scheduler.show_microphone()
+    await asyncio.sleep(0.05)
+
+    assert preview.calls[-1] == ("show", ("", 1, "microphone", 0))

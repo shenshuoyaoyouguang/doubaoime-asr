@@ -47,6 +47,21 @@ def test_overlay_preview_falls_back_to_tk(monkeypatch):
     assert legacy_backend.calls[2] == ("show", ("hello", 0, "interim", 0))
 
 
+def test_overlay_preview_skips_microphone_placeholder_on_tk_fallback(monkeypatch):
+    legacy_backend = _LegacyBackend()
+    monkeypatch.setattr(overlay_preview, "OverlayPreviewCpp", _BrokenNative)
+    monkeypatch.setattr(overlay_preview, "TkOverlayPreview", lambda: legacy_backend)
+
+    preview = overlay_preview.OverlayPreview(logging.getLogger("overlay-test"))
+    preview.start()
+    preview.show("", kind="microphone")
+
+    assert legacy_backend.calls == [
+        ("start", ()),
+        ("configure", (preview._config,)),
+    ]
+
+
 class _BrokenNativeCall:
     def __init__(self, *, logger=None):
         self.logger = logger

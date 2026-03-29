@@ -497,6 +497,7 @@ def test_handle_press_activates_capture_output(monkeypatch: pytest.MonkeyPatch):
 
     assert commands == ["START"]
     assert app.capture_output_guard.activate_calls == 1
+    assert app.overlay_scheduler.calls == [("microphone", ())]
     assert app._status == "启动识别中…"
 
 

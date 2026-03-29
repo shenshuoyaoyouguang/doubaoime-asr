@@ -21,12 +21,23 @@ constexpr UINT WM_APP_OVERLAY_HIDE = WM_APP + 2;
 constexpr UINT WM_APP_OVERLAY_STOP = WM_APP + 3;
 constexpr UINT WM_APP_OVERLAY_CONFIGURE = WM_APP + 4;
 
+// 麦克风模式相关常量
+constexpr float kMicrophoneBoxSizeDip = 160.0F;        // 麦克风框尺寸
+constexpr float kMicrophoneIconSizeDip = 48.0F;        // 麦克风图标尺寸
+constexpr float kRippleMaxRadiusDip = 80.0F;           // 波纹最大半径
+constexpr float kRippleDurationMs = 2000.0F;           // 波纹周期（毫秒）
+constexpr int kRippleCount = 3;                        // 波纹数量
+constexpr float kMicrophoneShakeAmplitude = 2.0F;      // 麦克风震动幅度
+constexpr float kMicrophoneShakeFrequency = 8.0F;      // 麦克风震动频率（Hz）
+
 struct OverlayStyle {
     float font_size = 14.0F;
     float max_width = 620.0F;
     float opacity = 0.92F;
     int bottom_offset = 120;
     int animation_ms = 150;
+    bool modern_style = true;                          // 现代简洁风格
+    float highlight_duration_ms = 300.0F;              // 高亮闪烁持续时间
 };
 
 struct OverlayShowPayload {
@@ -78,8 +89,12 @@ private:
     void ReleaseBitmapResources();
     void Render();
     bool ShouldAnimateTail() const;
+    bool IsMicrophoneMode() const;
     void StartAnimation(float target_opacity);
     void TickAnimation();
+    void DrawMicrophoneIcon(float center_x, float center_y, float size, float opacity);
+    void DrawRipples(float center_x, float center_y, float elapsed_ms);
+    void RenderMicrophoneMode();
     void Log(const std::string& message) const;
     float DpiScale() const;
 
@@ -99,6 +114,8 @@ private:
     float animation_start_opacity_ = 0.0F;
     std::chrono::steady_clock::time_point animation_started_at_{};
     std::chrono::steady_clock::time_point tail_animation_started_at_{};
+    std::chrono::steady_clock::time_point microphone_started_at_{};  // 麦克风模式开始时间
+    std::chrono::steady_clock::time_point highlight_started_at_{};   // 高亮动画开始时间
     int width_px_ = 0;
     int height_px_ = 0;
     int x_px_ = 0;
