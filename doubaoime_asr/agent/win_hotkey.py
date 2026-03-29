@@ -12,7 +12,8 @@ user32.GetKeyNameTextW.restype = ctypes.c_int
 
 
 FUNCTION_HOTKEYS = [f"f{i}" for i in range(1, 13)]
-SPECIAL_HOTKEYS = ["space", "insert", "pause", "scroll_lock"]
+RIGHT_CTRL_HOTKEY = "right_ctrl"
+SPECIAL_HOTKEYS = ["space", "insert", "pause", "scroll_lock", RIGHT_CTRL_HOTKEY]
 LETTER_HOTKEYS = list("abcdefghijklmnopqrstuvwxyz")
 DIGIT_HOTKEYS = list("0123456789")
 SUPPORTED_HOTKEYS = [*FUNCTION_HOTKEYS, *SPECIAL_HOTKEYS, *LETTER_HOTKEYS, *DIGIT_HOTKEYS]
@@ -23,6 +24,7 @@ HOTKEY_TO_VK: dict[str, int] = {
     "insert": 0x2D,
     "pause": 0x13,
     "scroll_lock": 0x91,
+    RIGHT_CTRL_HOTKEY: 0xA3,
 }
 
 for char in LETTER_HOTKEYS:
@@ -39,6 +41,7 @@ VK_TO_DISPLAY: dict[int, str] = {
     HOTKEY_TO_VK["insert"]: "INSERT",
     HOTKEY_TO_VK["pause"]: "PAUSE",
     HOTKEY_TO_VK["scroll_lock"]: "SCROLL LOCK",
+    HOTKEY_TO_VK[RIGHT_CTRL_HOTKEY]: "RIGHT CTRL",
 }
 
 

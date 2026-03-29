@@ -68,9 +68,6 @@ class WaveSession(BaseModel):
     ticket_long_exp: int
     expires_at: float
 
-    class Config:
-        arbitrary_types_allowed = True
-
     def is_expired(self) -> bool:
         """检查会话是否已过期"""
         return time.time() >= self.expires_at

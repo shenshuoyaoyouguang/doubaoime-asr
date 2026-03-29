@@ -28,6 +28,9 @@ def test_stable_cli_defaults_to_recognize(monkeypatch):
     config = build_config_from_args(args)
 
     assert getattr(args, "mode", None) is None
+    assert config.hotkey == "right_ctrl"
+    assert config.hotkey_vk == 0xA3
+    assert config.hotkey_display == "RIGHT CTRL"
     assert config.polish_mode == "light"
     assert config.overlay_render_fps == 60
     assert config.streaming_text_mode == "safe_inline"
@@ -82,3 +85,15 @@ def test_stable_cli_accepts_console_and_no_tray():
     assert args.mode == "recognize"
     assert args.console is True
     assert args.no_tray is True
+
+
+def test_stable_cli_accepts_right_ctrl_hotkey(monkeypatch):
+    monkeypatch.setattr(AgentConfig, "load", classmethod(lambda cls, path=None: cls.default()))
+    parser = build_arg_parser()
+    args = parser.parse_args(["--hotkey", "right_ctrl"])
+
+    config = build_config_from_args(args)
+
+    assert config.hotkey == "right_ctrl"
+    assert config.hotkey_vk == 0xA3
+    assert config.hotkey_display == "RIGHT CTRL"

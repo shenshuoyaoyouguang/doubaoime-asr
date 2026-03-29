@@ -931,7 +931,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=argparse.SUPPRESS,
         help="recognize 仅识别；inject 识别后尝试写入当前焦点输入框",
     )
-    parser.add_argument("--hotkey", help="覆盖默认热键，例如 f8 / f9 / space")
+    parser.add_argument("--hotkey", help="覆盖默认热键，例如 right_ctrl / f9 / space")
     parser.add_argument("--mic-device", help="覆盖麦克风设备名称或索引")
     parser.add_argument("--credential-path", help="覆盖凭据文件路径")
     parser.add_argument(

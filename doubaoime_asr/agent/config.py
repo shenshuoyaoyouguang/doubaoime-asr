@@ -36,6 +36,7 @@ SUPPORTED_CAPTURE_OUTPUT_POLICIES = (
     CAPTURE_OUTPUT_POLICY_OFF,
     CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT,
 )
+CURRENT_CONFIG_VERSION = 2
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 DEFAULT_OLLAMA_MODEL = "qwen35-opus-fixed:latest"
 DEFAULT_OLLAMA_KEEP_ALIVE = "15m"
@@ -43,6 +44,9 @@ DEFAULT_OLLAMA_PROMPT_TEMPLATE = """润色下面这句语音识别文本：保�
 {text}
 """
 SUPPORTED_MODES = ("inject", "recognize")
+DEFAULT_AGENT_HOTKEY = "right_ctrl"
+DEFAULT_AGENT_HOTKEY_VK = vk_from_hotkey(DEFAULT_AGENT_HOTKEY)
+DEFAULT_AGENT_HOTKEY_DISPLAY = vk_to_display(DEFAULT_AGENT_HOTKEY_VK)
 
 
 def default_agent_dir() -> Path:
@@ -89,9 +93,10 @@ def discover_preferred_credential_path() -> Path | None:
 
 @dataclass(slots=True)
 class AgentConfig:
-    hotkey: str = "f8"
-    hotkey_vk: int | None = None
-    hotkey_display: str | None = None
+    config_version: int = CURRENT_CONFIG_VERSION
+    hotkey: str = DEFAULT_AGENT_HOTKEY
+    hotkey_vk: int | None = DEFAULT_AGENT_HOTKEY_VK
+    hotkey_display: str | None = DEFAULT_AGENT_HOTKEY_DISPLAY
     mode: str = "inject"
     microphone_device: int | str | None = None
     credential_path: str | None = None
@@ -163,11 +168,20 @@ class AgentConfig:
             payload = json.loads(config_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return base
+        if not isinstance(payload, dict):
+            return base
 
         data: dict[str, Any] = asdict(base)
         for key in data:
             if key in payload:
                 data[key] = payload[key]
+        config_version = _coerce_config_version(payload.get("config_version"))
+        data["config_version"] = max(config_version, CURRENT_CONFIG_VERSION)
+        migrated_hotkey_defaults = config_version < CURRENT_CONFIG_VERSION
+        if migrated_hotkey_defaults:
+            data["hotkey"] = DEFAULT_AGENT_HOTKEY
+            data["hotkey_vk"] = DEFAULT_AGENT_HOTKEY_VK
+            data["hotkey_display"] = DEFAULT_AGENT_HOTKEY_DISPLAY
         if data.get("credential_path") == fallback_default_path and base.credential_path != fallback_default_path:
             data["credential_path"] = base.credential_path
         hotkey_value, hotkey_vk, hotkey_display = _sanitize_hotkey_model(
@@ -250,7 +264,13 @@ class AgentConfig:
             if isinstance(prompt_template, str) and prompt_template.strip()
             else base.ollama_prompt_template
         )
-        return cls(**data)
+        config = cls(**data)
+        if migrated_hotkey_defaults:
+            try:
+                config.save(config_path)
+            except OSError:
+                pass
+        return config
 
     def save(self, path: str | Path | None = None) -> Path:
         config_path = Path(path) if path is not None else self.default_path()
@@ -307,9 +327,11 @@ def _sanitize_hotkey_model(
         vk = int(hotkey_vk)
         if vk <= 0:
             raise ValueError
+        canonical_hotkey = vk_to_hotkey(vk)
+        if canonical_hotkey is not None:
+            return canonical_hotkey, vk, vk_to_display(vk)
         display = str(hotkey_display).strip() if isinstance(hotkey_display, str) and hotkey_display.strip() else vk_to_display(vk)
-        legacy_hotkey = vk_to_hotkey(vk) or normalize_hotkey(display)
-        return legacy_hotkey, vk, display
+        return normalize_hotkey(display), vk, display
     except (TypeError, ValueError):
         pass
 
@@ -327,6 +349,14 @@ def _clamp_int(value: Any, fallback: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         return fallback
     return max(minimum, min(maximum, number))
+
+
+def _coerce_config_version(value: Any) -> int:
+    try:
+        version = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return version if version > 0 else 0
 
 
 def _sanitize_optional_text(value: Any) -> str:

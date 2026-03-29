@@ -55,6 +55,36 @@ def test_build_config_from_settings_values_updates_runtime_fields():
     assert updated.overlay_font_size == 16
 
 
+def test_build_config_from_settings_values_canonicalizes_right_ctrl():
+    updated = build_config_from_settings_values(
+        AgentConfig(),
+        {
+            "hotkey_vk": "163",
+            "hotkey_display": "CTRL",
+            "mode": "inject",
+            "microphone_device": "__default__",
+            "injection_policy": "direct_only",
+            "capture_output_policy": "off",
+            "render_debounce_ms": "80",
+            "polish_mode": "off",
+            "ollama_base_url": "http://localhost:11434",
+            "ollama_model": "",
+            "polish_timeout_ms": "800",
+            "ollama_warmup_enabled": "true",
+            "overlay_render_fps": "30",
+            "overlay_font_size": "14",
+            "overlay_max_width": "620",
+            "overlay_opacity_percent": "92",
+            "overlay_bottom_offset": "120",
+            "overlay_animation_ms": "150",
+        },
+    )
+
+    assert updated.hotkey == "right_ctrl"
+    assert updated.hotkey_vk == 163
+    assert updated.hotkey_display == "RIGHT CTRL"
+
+
 def test_build_config_from_settings_values_rejects_invalid_hotkey():
     with pytest.raises(SettingsValidationError):
         build_config_from_settings_values(

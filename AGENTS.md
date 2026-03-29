@@ -207,7 +207,7 @@ pytest tests/test_runtime.py -v
 |---|---|
 | 凭据缓存 | `%APPDATA%/DoubaoVoiceInput/credentials.json` |
 | 日志目录 | `%APPDATA%/DoubaoVoiceInput/logs/` |
-| 默认热键 | `F8` |
+| 默认热键 | `Right Ctrl` |
 | 采样率 | `16000 Hz` |
 | 声道 | 单声道 |
 | Opus 帧长 | `20ms` |

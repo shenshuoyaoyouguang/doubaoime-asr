@@ -119,8 +119,8 @@ python -m doubaoime_asr.agent.stable_main
 默认行为：
 
 - 平台：仅支持 Windows
-- 热键：`F8`
-- 交互：按住 `F8` 说话，松开结束
+- 热键：`Right Ctrl`
+- 交互：按住 `Right Ctrl` 说话，松开结束
 - 默认模式：`inject`
 - 默认形态：系统托盘常驻
 - 默认效果：识别结果尝试写入当前焦点输入框
@@ -145,9 +145,10 @@ python -m doubaoime_asr.agent.stable_main
 
 ```json
 {
-  "hotkey": "f8",
-  "hotkey_vk": 119,
-  "hotkey_display": "F8",
+  "config_version": 2,
+  "hotkey": "right_ctrl",
+  "hotkey_vk": 163,
+  "hotkey_display": "RIGHT CTRL",
   "mode": "inject",
   "microphone_device": null,
   "credential_path": "%APPDATA%/DoubaoVoiceInput/credentials.json",
@@ -162,6 +163,11 @@ python -m doubaoime_asr.agent.stable_main
 }
 ```
 
+升级说明：
+
+- 旧版本配置文件首次加载时，会一次性把热键迁移为 `Right Ctrl`
+- 迁移完成后，仍可在设置窗口或命令行改成其它受支持单键
+
 凭据路径默认策略：
 
 - 优先使用当前工作目录或项目目录下已存在的 `credentials.json`
@@ -171,6 +177,7 @@ python -m doubaoime_asr.agent.stable_main
 
 ```bash
 doubao-voice-agent --hotkey f9 --render-debounce-ms 50
+doubao-voice-agent --hotkey right_ctrl
 doubao-voice-agent --hotkey space
 doubao-voice-agent --mode inject
 doubao-voice-agent --mode recognize --console
@@ -178,7 +185,7 @@ doubao-voice-agent --injection-policy direct_then_clipboard
 doubao-voice-agent --no-tray --console
 ```
 
-托盘菜单现在提供 **“设置”** 入口，可以直接修改热键、注入策略、麦克风和悬浮窗样式；保存后会尽量即时生效。热键支持**录制任意单键**。默认注入策略是 `direct_then_clipboard`：先尝试直接输入，只有直接输入失败时才会使用剪贴板回退。如果你明确不希望任何情况下触碰剪贴板，可以改成 `direct_only`。终端（Windows Terminal / cmd / PowerShell）会自动使用终端专用注入策略。
+托盘菜单现在提供 **“设置”** 入口，可以直接修改热键、注入策略、麦克风和悬浮窗样式；保存后会尽量即时生效。热键支持**录制单键（含 Right Ctrl）**。默认注入策略是 `direct_then_clipboard`：先尝试直接输入，只有直接输入失败时才会使用剪贴板回退。如果你明确不希望任何情况下触碰剪贴板，可以改成 `direct_only`。终端（Windows Terminal / cmd / PowerShell）会自动使用终端专用注入策略。
 
 ### 打包为可分发程序
 

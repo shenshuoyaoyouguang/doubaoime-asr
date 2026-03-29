@@ -1,16 +1,18 @@
 import pytest
 
-from doubaoime_asr.agent.win_hotkey import normalize_hotkey, vk_from_hotkey, vk_to_display
+from doubaoime_asr.agent.win_hotkey import normalize_hotkey, vk_from_hotkey, vk_to_display, vk_to_hotkey
 
 
 def test_normalize_hotkey():
     assert normalize_hotkey("F8") == "f8"
     assert normalize_hotkey("scroll lock") == "scroll_lock"
+    assert normalize_hotkey("Right Ctrl") == "right_ctrl"
 
 
 def test_vk_from_hotkey():
     assert vk_from_hotkey("f8") == 0x77
     assert vk_from_hotkey("space") == 0x20
+    assert vk_from_hotkey("right_ctrl") == 0xA3
     assert vk_from_hotkey("a") == ord("A")
     assert vk_from_hotkey("1") == ord("1")
 
@@ -22,4 +24,9 @@ def test_vk_from_hotkey_rejects_unsupported():
 
 def test_vk_to_display_formats_known_keys():
     assert vk_to_display(0x77) == "F8"
+    assert vk_to_display(0xA3) == "RIGHT CTRL"
     assert vk_to_display(ord("A")) == "A"
+
+
+def test_vk_to_hotkey_returns_canonical_right_ctrl():
+    assert vk_to_hotkey(0xA3) == "right_ctrl"

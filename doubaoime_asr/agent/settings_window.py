@@ -21,7 +21,7 @@ from .config import (
     SUPPORTED_POLISH_MODES,
 )
 from .win_hotkey import normalize_hotkey, vk_from_hotkey, vk_to_display, vk_to_hotkey
-from .win_keyboard_hook import SingleKeyRecorder
+from .win_keyboard_hook import SingleKeyRecorder, VK_RCONTROL
 
 
 MODE_OPTIONS: list[tuple[str, str]] = [
@@ -90,8 +90,13 @@ def build_config_from_settings_values(
             hotkey_vk = int(hotkey_vk_raw)
         except ValueError as exc:
             raise SettingsValidationError("热键值无效") from exc
-        hotkey_display = values.get("hotkey_display", "").strip() or vk_to_display(hotkey_vk)
-        hotkey = vk_to_hotkey(hotkey_vk) or normalize_hotkey(hotkey_display)
+        canonical_hotkey = vk_to_hotkey(hotkey_vk)
+        if canonical_hotkey is not None:
+            hotkey = canonical_hotkey
+            hotkey_display = vk_to_display(hotkey_vk)
+        else:
+            hotkey_display = values.get("hotkey_display", "").strip() or vk_to_display(hotkey_vk)
+            hotkey = normalize_hotkey(hotkey_display)
     else:
         hotkey = normalize_hotkey(values.get("hotkey", ""))
         if not hotkey:
@@ -467,7 +472,7 @@ class SettingsWindowController:
         hint_handle = win32gui.CreateWindowEx(
             0,
             "STATIC",
-            "热键支持录制任意单键；Ollama 润色只处理最终结果，失败会自动回退原文。",
+            "热键支持录制单键（含 Right Ctrl）；Ollama 润色只处理最终结果，失败会自动回退原文。",
             win32con.WS_CHILD | win32con.WS_VISIBLE,
             label_x,
             row_y + (len(rows) + 1) * row_step + 4,
@@ -621,13 +626,13 @@ class SettingsWindowController:
             self._recorder = None
 
         self._recording = True
-        win32gui.SetWindowText(self._controls["hotkey_display"], "请按任意单键…")
+        win32gui.SetWindowText(self._controls["hotkey_display"], "请按单键（支持 Right Ctrl）…")
 
         def on_key(vk: int, display: str) -> None:
             self._pending_hotkey_capture = (vk, display)
             win32gui.PostMessage(hwnd, self.WM_APP_HOTKEY_CAPTURED, vk, 0)
 
-        self._recorder = SingleKeyRecorder(on_key=on_key)
+        self._recorder = SingleKeyRecorder(on_key=on_key, allowed_modifier_vks={VK_RCONTROL})
         self._recorder.start()
 
     def _update_hotkey_label(self) -> None:

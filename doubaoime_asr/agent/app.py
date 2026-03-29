@@ -351,7 +351,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="不显示系统托盘，仅在前台保持热键监听",
     )
-    parser.add_argument("--hotkey", help="覆盖默认热键，例如 f8")
+    parser.add_argument("--hotkey", help="覆盖默认热键，例如 right_ctrl / f9 / space")
     parser.add_argument("--mic-device", help="覆盖麦克风设备名称或索引")
     parser.add_argument("--credential-path", help="覆盖凭据文件路径")
     parser.add_argument("--render-debounce-ms", type=int, help="流式渲染防抖毫秒数")

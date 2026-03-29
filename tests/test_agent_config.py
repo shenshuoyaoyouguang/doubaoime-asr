@@ -4,6 +4,7 @@ import sys
 from doubaoime_asr.agent.config import (
     AgentConfig,
     CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT,
+    CURRENT_CONFIG_VERSION,
     INJECTION_POLICY_DIRECT_THEN_CLIPBOARD,
     POLISH_MODE_OLLAMA,
     STREAMING_TEXT_MODE_OVERLAY_ONLY,
@@ -52,6 +53,10 @@ def test_agent_config_creates_default_file(tmp_path: Path, monkeypatch):
 
     assert Path(loaded.default_path()).exists()
     assert AgentConfig.default_log_path() == tmp_path / "DoubaoVoiceInput" / "logs" / "agent.log"
+    assert loaded.config_version == CURRENT_CONFIG_VERSION
+    assert loaded.hotkey == "right_ctrl"
+    assert loaded.hotkey_vk == 0xA3
+    assert loaded.hotkey_display == "RIGHT CTRL"
     assert loaded.overlay_render_fps == 60
     assert loaded.overlay_animation_ms == 80
     assert loaded.streaming_text_mode == "safe_inline"
@@ -85,8 +90,41 @@ def test_agent_config_load_migrates_old_default_credential_path(tmp_path: Path, 
     loaded = AgentConfig.load(config_path)
 
     assert loaded.credential_path == str(repo_cred)
-    assert loaded.hotkey_vk == 0x77
-    assert loaded.hotkey_display == "F8"
+    assert loaded.config_version == CURRENT_CONFIG_VERSION
+    assert loaded.hotkey == "right_ctrl"
+    assert loaded.hotkey_vk == 0xA3
+    assert loaded.hotkey_display == "RIGHT CTRL"
+
+
+def test_agent_config_load_forces_old_config_hotkey_to_right_ctrl(tmp_path: Path):
+    path = tmp_path / "config.json"
+    path.write_text(
+        '{"config_version":1,"hotkey":"f9","hotkey_vk":120,"hotkey_display":"F9"}',
+        encoding="utf-8",
+    )
+
+    loaded = AgentConfig.load(path)
+
+    assert loaded.config_version == CURRENT_CONFIG_VERSION
+    assert loaded.hotkey == "right_ctrl"
+    assert loaded.hotkey_vk == 0xA3
+    assert loaded.hotkey_display == "RIGHT CTRL"
+    assert '"hotkey": "right_ctrl"' in path.read_text(encoding="utf-8")
+
+
+def test_agent_config_load_preserves_custom_hotkey_after_migration_version(tmp_path: Path):
+    path = tmp_path / "config.json"
+    path.write_text(
+        '{"config_version":2,"hotkey":"f9","hotkey_vk":120,"hotkey_display":"F9"}',
+        encoding="utf-8",
+    )
+
+    loaded = AgentConfig.load(path)
+
+    assert loaded.config_version == CURRENT_CONFIG_VERSION
+    assert loaded.hotkey == "f9"
+    assert loaded.hotkey_vk == 0x78
+    assert loaded.hotkey_display == "F9"
 
 
 def test_agent_config_overlay_style_payload():

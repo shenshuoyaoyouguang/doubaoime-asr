@@ -148,8 +148,14 @@ class GlobalHotkeyHook:
 
 
 class SingleKeyRecorder:
-    def __init__(self, on_key: Callable[[int, str], None]) -> None:
+    def __init__(
+        self,
+        on_key: Callable[[int, str], None],
+        *,
+        allowed_modifier_vks: set[int] | None = None,
+    ) -> None:
         self._on_key = on_key
+        self._allowed_modifier_vks = set(allowed_modifier_vks or ())
         self._thread: threading.Thread | None = None
         self._thread_id: int | None = None
         self._hook = None
@@ -181,11 +187,15 @@ class SingleKeyRecorder:
         def callback(nCode, wParam, lParam):
             if nCode == HC_ACTION and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
                 data = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-                if data.vkCode not in MODIFIER_VKS and not self._captured:
-                    self._captured = True
-                    self._on_key(int(data.vkCode), vk_to_display(int(data.vkCode)))
-                    if self._thread_id is not None:
-                        user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
+                vk = int(data.vkCode)
+                if self._captured:
+                    return user32.CallNextHookEx(None, nCode, wParam, lParam)
+                if vk in MODIFIER_VKS and vk not in self._allowed_modifier_vks:
+                    return user32.CallNextHookEx(None, nCode, wParam, lParam)
+                self._captured = True
+                self._on_key(vk, vk_to_display(vk))
+                if self._thread_id is not None:
+                    user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
             return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
         self._callback = callback
