@@ -31,8 +31,10 @@ class TkOverlayPreview:
         seq: int = 0,
         kind: str = "interim",
         stable_prefix_utf16_len: int = 0,
+        show_microphone: bool = False,
+        level: float = 0.0,
     ) -> None:
-        self._queue.put(("show", (text, seq, kind, stable_prefix_utf16_len)))
+        self._queue.put(("show", (text, seq, kind, stable_prefix_utf16_len, show_microphone, level)))
 
     def hide(self, reason: str = "") -> None:
         self._queue.put(("hide", reason))
@@ -93,12 +95,15 @@ class TkOverlayPreview:
                 while True:
                     action, payload = self._queue.get_nowait()
                     if action == "show" and isinstance(payload, tuple):
-                        text, seq, _kind, _stable_prefix_utf16_len = payload
+                        text, seq, _kind, _stable_prefix_utf16_len, show_microphone, _level = payload
                         if seq < self._last_seq:
                             continue
                         self._last_seq = seq
                         apply_config()
-                        label.configure(text=text)
+                        display_text = text or "正在聆听…"
+                        if show_microphone:
+                            display_text = f"麦克风  {display_text}"
+                        label.configure(text=display_text)
                         position_window()
                         window.deiconify()
                     elif action == "configure":
@@ -138,6 +143,8 @@ class OverlayPreview:
         seq: int = 0,
         kind: str = "interim",
         stable_prefix_utf16_len: int = 0,
+        show_microphone: bool = False,
+        level: float = 0.0,
     ) -> None:
         self._invoke(
             "show",
@@ -145,6 +152,8 @@ class OverlayPreview:
             seq=seq,
             kind=kind,
             stable_prefix_utf16_len=stable_prefix_utf16_len,
+            show_microphone=show_microphone,
+            level=level,
         )
 
     def hide(self, reason: str = "") -> None:
@@ -185,11 +194,6 @@ class OverlayPreview:
         self._ensure_backend_started()
         if self._backend is None:
             return
-        if self._using_legacy and method == "show":
-            text = str(args[0]) if args else str(kwargs.get("text", ""))
-            kind = str(kwargs.get("kind", "interim"))
-            if kind == "microphone" and not text:
-                return
         try:
             getattr(self._backend, method)(*args, **kwargs)
         except Exception:

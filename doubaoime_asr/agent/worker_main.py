@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from array import array
 import contextlib
 from datetime import datetime
 import logging
+import math
 import os
 from pathlib import Path
 import sys
 import threading
+import time
 from typing import AsyncIterator
 
 from doubaoime_asr.asr import ResponseType, transcribe_realtime
@@ -17,6 +20,9 @@ from doubaoime_asr.config import ASRConfig
 from .config import AgentConfig
 from .protocol import encode_event
 from .runtime_logging import setup_named_logger
+
+LOW_LATENCY_PREBUFFER_MIN_FRAMES = 1
+LOW_LATENCY_PREBUFFER_TIMEOUT_S = 0.18
 
 
 def _configure_stdio_utf8() -> None:
@@ -38,6 +44,23 @@ def _response_segment_index(response) -> int | None:
     if not indexes:
         return None
     return max(indexes)
+
+
+def _measure_audio_level(frame_bytes: bytes) -> float:
+    if not frame_bytes:
+        return 0.0
+    try:
+        samples = array("h")
+        samples.frombytes(frame_bytes)
+    except (BufferError, ValueError):
+        return 0.0
+    if not samples:
+        return 0.0
+    if sys.byteorder != "little":
+        samples.byteswap()
+    energy = sum(sample * sample for sample in samples) / len(samples)
+    rms = math.sqrt(energy) / 32768.0
+    return max(0.0, min(1.0, rms))
 
 
 def build_worker_log_path(path_arg: str | None = None) -> Path:
@@ -79,6 +102,9 @@ class BufferedAudioCapture:
         self._startup_error: Exception | None = None
         self._task: asyncio.Task[None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._last_level_emit_at = 0.0
+        self._last_emitted_level = 0.0
+        self._smoothed_level = 0.0
 
     async def start(self) -> None:
         if self._task is not None:
@@ -121,6 +147,20 @@ class BufferedAudioCapture:
         if self._task is not None:
             await self._task
 
+    def _emit_audio_level(self, frame_bytes: bytes) -> None:
+        if self._loop is None:
+            return
+        now = time.perf_counter()
+        level = _measure_audio_level(frame_bytes)
+        self._smoothed_level += (level - self._smoothed_level) * 0.35
+        throttled = now - self._last_level_emit_at < 1.0 / 30.0
+        small_change = abs(self._smoothed_level - self._last_emitted_level) < 0.015
+        if throttled and small_change:
+            return
+        self._last_level_emit_at = now
+        self._last_emitted_level = self._smoothed_level
+        self._loop.call_soon_threadsafe(_emit_stdout, "audio_level", level=round(self._smoothed_level, 4))
+
     async def _capture_loop(self) -> None:
         import sounddevice as sd
         import numpy as np
@@ -143,6 +183,7 @@ class BufferedAudioCapture:
             if not self.first_chunk_event.is_set():
                 self._loop.call_soon_threadsafe(self.first_chunk_event.set)
             self._loop.call_soon_threadsafe(self._queue.put_nowait, data)
+            self._emit_audio_level(data)
 
         try:
             self.logger.info(
@@ -227,7 +268,10 @@ async def _run_single_session(
         return 4
 
     try:
-        buffered_ok = await capture.wait_for_prebuffer(min_frames=2, timeout_s=0.18)
+        buffered_ok = await capture.wait_for_prebuffer(
+            min_frames=LOW_LATENCY_PREBUFFER_MIN_FRAMES,
+            timeout_s=LOW_LATENCY_PREBUFFER_TIMEOUT_S,
+        )
         logger.info(
             "prebuffer_ready=%s chunks=%s bytes=%s stop_requested=%s",
             buffered_ok,

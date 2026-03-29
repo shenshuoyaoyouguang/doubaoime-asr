@@ -333,6 +333,8 @@ int WINAPI wWinMain(HINSTANCE instance_handle, HINSTANCE, PWSTR, int) {
                 payload->stable_prefix_utf16_len = static_cast<unsigned long long>(
                     ParseInt(command->fields, "stable_prefix_utf16_len", 0)
                 );
+                payload->show_microphone = ParseInt(command->fields, "show_microphone", 0) != 0;
+                payload->level = std::clamp(ParseFloat(command->fields, "level", 0.0F), 0.0F, 1.0F);
                 PostMessageW(hwnd, overlay_ui::WM_APP_OVERLAY_SHOW, 0, reinterpret_cast<LPARAM>(payload.release()));
             } else if (command->cmd == "configure") {
                 auto style = std::make_unique<overlay_ui::OverlayStyle>();

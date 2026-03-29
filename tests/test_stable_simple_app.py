@@ -86,8 +86,14 @@ class _DummyScheduler:
     async def submit_final(self, text: str, *, kind: str) -> None:
         self.calls.append(("final", (text, kind)))
 
-    async def show_microphone(self) -> None:
-        self.calls.append(("microphone", ()))
+    async def show_microphone(self, placeholder_text: str = "正在聆听…") -> None:
+        self.calls.append(("microphone", (placeholder_text,)))
+
+    async def update_microphone_level(self, level: float) -> None:
+        self.calls.append(("audio_level", (level,)))
+
+    async def stop_microphone(self) -> None:
+        self.calls.append(("stop_microphone", ()))
 
     async def hide(self, reason: str) -> None:
         self.calls.append(("hide", (reason,)))
@@ -404,6 +410,17 @@ def test_handle_worker_interim_updates_inline_composition(monkeypatch: pytest.Mo
     assert session.composition.rendered_text == "你好啊"
 
 
+def test_handle_worker_audio_level_updates_overlay(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    session = _build_session(90)
+    session.active = True
+    app._session = session
+
+    asyncio.run(app._handle_worker_event(90, {"type": "audio_level", "level": 0.35}))
+
+    assert app.overlay_scheduler.calls == [("audio_level", (0.35,))]
+
+
 def test_handle_worker_interim_keeps_previous_final_segments(monkeypatch: pytest.MonkeyPatch):
     config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
     app = _build_app(monkeypatch, config)
@@ -568,8 +585,29 @@ def test_handle_press_activates_capture_output(monkeypatch: pytest.MonkeyPatch):
 
     assert commands == ["START"]
     assert app.capture_output_guard.activate_calls == 1
-    assert app.overlay_scheduler.calls == [("microphone", ())]
+    assert app.overlay_scheduler.calls == [("microphone", ("正在聆听…",))]
     assert app._status == "启动识别中（仅识别，不自动上屏）…"
+
+
+def test_send_stop_hides_microphone_hud_before_waiting(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    session = _build_session(14)
+    session.active = True
+    app._session = session
+    commands: list[str] = []
+
+    async def fake_send_worker_command(command: str) -> None:
+        commands.append(command)
+
+    monkeypatch.setattr(app, "_send_worker_command", fake_send_worker_command)
+
+    asyncio.run(app._send_stop("worker_stop_sent", "等待最终结果…"))
+
+    assert commands == ["STOP"]
+    assert app.overlay_scheduler.calls == [("stop_microphone", ())]
+    assert session.stop_sent is True
+    assert session.pending_stop is False
+    assert app._status == "等待最终结果…"
 
 
 def test_handle_press_releases_capture_output_when_start_fails(monkeypatch: pytest.MonkeyPatch):

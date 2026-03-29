@@ -316,8 +316,7 @@ class StableVoiceInputApp:
             self.set_status(restore_warning or "启动识别失败，请查看 controller.log")
             await self._restart_worker()
             return
-        # 显示麦克风界面（而非隐藏 overlay）
-        await self.overlay_scheduler.show_microphone()
+        await self.overlay_scheduler.show_microphone("正在聆听…")
         self.set_status(self._session_start_status(capture_output_warning))
 
     async def _handle_release(self) -> None:
@@ -341,6 +340,7 @@ class StableVoiceInputApp:
         if self._session is None:
             return
         await self._send_worker_command("STOP")
+        await self.overlay_scheduler.stop_microphone()
         self._session.stop_sent = True
         self._session.pending_stop = False
         self.logger.info(log_tag)
@@ -485,6 +485,13 @@ class StableVoiceInputApp:
             message = str(event.get("message", ""))
             if message:
                 self.set_status(message)
+        elif event_type == "audio_level":
+            if session.active:
+                try:
+                    level = float(event.get("level", 0.0))
+                except (TypeError, ValueError):
+                    level = 0.0
+                await self.overlay_scheduler.update_microphone_level(level)
         elif event_type == "interim":
             text = str(event.get("text", ""))
             if text and session.active:

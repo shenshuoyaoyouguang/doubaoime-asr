@@ -152,6 +152,8 @@ class OverlayPreviewCpp:
         seq: int = 0,
         kind: str = "interim",
         stable_prefix_utf16_len: int = 0,
+        show_microphone: bool = False,
+        level: float = 0.0,
     ) -> None:
         self._send_command(
             "show",
@@ -159,6 +161,8 @@ class OverlayPreviewCpp:
             seq=str(seq),
             kind=kind,
             stable_prefix_utf16_len=str(max(0, int(stable_prefix_utf16_len))),
+            show_microphone="1" if show_microphone else "0",
+            level=f"{max(0.0, min(1.0, float(level))):.4f}",
         )
 
     def hide(self, reason: str = "") -> None:

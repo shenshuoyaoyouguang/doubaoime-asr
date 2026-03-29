@@ -15,12 +15,10 @@ namespace {
 constexpr wchar_t kWindowClassName[] = L"DoubaoOverlayWindow";
 constexpr float kMaxTextHeightDip = 1200.0F;
 constexpr float kMinWidthDip = 120.0F;
-constexpr float kPaddingXDip = 18.0F;
-constexpr float kPaddingYDip = 12.0F;
-constexpr float kCornerRadiusDip = 10.0F;
+constexpr float kPaddingXDip = 15.0F;
+constexpr float kPaddingYDip = 10.0F;
+constexpr float kCornerRadiusDip = 20.0F;
 constexpr float kBorderWidthDip = 1.0F;
-constexpr float kShadowOffsetYDip = 4.0F;
-constexpr float kShadowInsetDip = 3.0F;
 constexpr int kMinMarginDip = 20;
 
 #ifndef DWMWA_WINDOW_CORNER_PREFERENCE
@@ -125,38 +123,40 @@ void OverlayWindow::ShowText(OverlayShowPayload payload) {
     last_seq_ = payload.seq;
     const bool text_changed = text_ != payload.text;
     const bool kind_changed = kind_ != payload.kind;
+    const bool microphone_visibility_changed = show_microphone_ != payload.show_microphone;
     text_ = std::move(payload.text);
     kind_ = std::move(payload.kind);
+    show_microphone_ = payload.show_microphone;
+    microphone_level_ = std::clamp(payload.level, 0.0F, 1.0F);
     stable_prefix_utf16_len_ = std::min<unsigned long long>(payload.stable_prefix_utf16_len, text_.size());
 
-    // 麦克风模式：空文字但显示界面
-    const bool is_microphone = kind_ == L"microphone";
-
-    if (text_.empty() && !is_microphone) {
+    if (text_.empty() && !show_microphone_) {
         Hide();
         return;
     }
 
-    if (text_changed || kind_changed || text_layout_ == nullptr) {
+    if (microphone_visibility_changed && !show_microphone_) {
+        session_peak_width_px_ = 0;
+    }
+
+    if (text_changed || kind_changed || microphone_visibility_changed || text_layout_ == nullptr) {
         if (!text_.empty()) {
             RebuildLayout();
+        } else {
+            text_layout_.Reset();
+            prefix_layout_.Reset();
+            UpdateGeometry();
         }
     } else if (prefix_layout_ == nullptr && stable_prefix_utf16_len_ > 0 && stable_prefix_utf16_len_ < text_.size()) {
         RebuildPrefixLayout();
     }
 
-    // 初始化麦克风动画时间
-    if (is_microphone) {
+    if (show_microphone_ && (microphone_visibility_changed || visibility_state_ == VisibilityState::Hidden)) {
         microphone_started_at_ = std::chrono::steady_clock::now();
-        UpdateGeometry();  // 麦克风模式需要更新尺寸
+        if (microphone_visibility_changed) {
+            displayed_microphone_level_ = 0.0F;
+        }
     }
-
-    // 初始化高亮动画时间
-    if (kind_changed || text_changed) {
-        highlight_started_at_ = std::chrono::steady_clock::now();
-    }
-
-    tail_animation_started_at_ = std::chrono::steady_clock::now();
 
     if (!window_visible_) {
         ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
@@ -171,7 +171,7 @@ void OverlayWindow::ShowText(OverlayShowPayload payload) {
 
     target_opacity_ = 1.0F;
     visibility_state_ = VisibilityState::Visible;
-    if (ShouldAnimateTail() || is_microphone) {
+    if (show_microphone_) {
         SetTimer(hwnd_, kAnimationTimerId, 16, nullptr);
     }
     Render();
@@ -544,59 +544,34 @@ void OverlayWindow::RebuildPrefixLayout() {
 
 void OverlayWindow::UpdateGeometry() {
     const float scale = DpiScale();
-
-    // 麦克风模式：使用固定正方形尺寸
-    if (IsMicrophoneMode()) {
-        const int box_size = static_cast<int>(std::ceil(kMicrophoneBoxSizeDip * scale));
-        width_px_ = box_size;
-        height_px_ = box_size;
-        session_peak_width_px_ = 0;  // 麦克风模式不记录 peak width
-
-        MONITORINFO monitor_info{};
-        monitor_info.cbSize = sizeof(monitor_info);
-        const HMONITOR monitor = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY);
-        if (!GetMonitorInfoW(monitor, &monitor_info)) {
-            return;
-        }
-
-        const RECT work_area = monitor_info.rcWork;
-        const int margin = static_cast<int>(std::round(kMinMarginDip * scale));
-        const int bottom_offset = static_cast<int>(std::round(static_cast<float>(style_.bottom_offset) * scale));
-        const int work_width = work_area.right - work_area.left;
-        const int work_height = work_area.bottom - work_area.top;
-
-        x_px_ = std::max(work_area.left + margin, work_area.left + (work_width - width_px_) / 2);
-        y_px_ = std::max(work_area.top + margin, work_area.top + work_height - height_px_ - bottom_offset);
-        return;
-    }
-
-    // 文字模式：根据文字内容计算尺寸
-    if (text_layout_ == nullptr) {
-        width_px_ = 0;
-        height_px_ = 0;
-        return;
-    }
-
-    DWRITE_TEXT_METRICS metrics{};
-    if (FAILED(text_layout_->GetMetrics(&metrics))) {
-        width_px_ = 0;
-        height_px_ = 0;
-        return;
-    }
-
     const float padding_x = kPaddingXDip * scale;
     const float padding_y = kPaddingYDip * scale;
     const int min_width = static_cast<int>(std::ceil(kMinWidthDip * scale));
+    const float microphone_diameter = show_microphone_ ? (kMicrophoneCircleSizeDip * scale) : 0.0F;
+    const float microphone_gap = show_microphone_ ? (kMicrophoneTextGapDip * scale) : 0.0F;
 
-    const int natural_width_px = std::max(
-        min_width,
-        static_cast<int>(std::ceil(metrics.widthIncludingTrailingWhitespace + padding_x * 2.0F))
-    );
-    const int max_width_px = static_cast<int>(std::ceil(style_.max_width * scale + padding_x * 2.0F));
-    const int clamped_width_px = std::min(max_width_px, natural_width_px);
+    float text_width = static_cast<float>(min_width);
+    float text_height = std::ceil(font_size_dip_ + 4.0F * scale);
+    if (text_layout_ != nullptr) {
+        DWRITE_TEXT_METRICS metrics{};
+        if (FAILED(text_layout_->GetMetrics(&metrics))) {
+            width_px_ = 0;
+            height_px_ = 0;
+            return;
+        }
+        text_width = std::max<float>(show_microphone_ ? (kHudMinTextWidthDip * scale) : min_width, std::ceil(metrics.widthIncludingTrailingWhitespace));
+        text_height = std::max<float>(text_height, std::ceil(metrics.height));
+    }
+
+    const float content_width = microphone_diameter + microphone_gap + text_width;
+    const int natural_width_px = static_cast<int>(std::ceil(content_width + padding_x * 2.0F));
+    const int max_width_px = static_cast<int>(std::ceil(style_.max_width * scale + padding_x * 2.0F + microphone_diameter + microphone_gap));
+    const int clamped_width_px = std::min(max_width_px, std::max(min_width, natural_width_px));
     session_peak_width_px_ = std::max(session_peak_width_px_, clamped_width_px);
     width_px_ = session_peak_width_px_;
-    height_px_ = static_cast<int>(std::ceil(metrics.height + padding_y * 2.0F));
+
+    const float content_height = std::max(text_height, microphone_diameter);
+    height_px_ = static_cast<int>(std::ceil(content_height + padding_y * 2.0F));
 
     MONITORINFO monitor_info{};
     monitor_info.cbSize = sizeof(monitor_info);
@@ -620,8 +595,7 @@ void OverlayWindow::Render() {
         return;
     }
 
-    const bool is_microphone = IsMicrophoneMode();
-    if (!is_microphone && text_layout_ == nullptr) {
+    if (!show_microphone_ && text_layout_ == nullptr) {
         return;
     }
     if (!EnsureDeviceResources() || !EnsureBitmapResources()) {
@@ -635,44 +609,40 @@ void OverlayWindow::Render() {
         dc_render_target_->SetTransform(D2D1::Matrix3x2F::Identity());
         dc_render_target_->Clear(D2D1::ColorF(0.0F, 0.0F, 0.0F, 0.0F));
 
+        const bool is_listening = kind_ == L"listening";
         const bool is_interim = kind_ == L"interim";
         const bool is_polishing = kind_ == L"polishing";
         const bool is_final_committed = kind_ == L"final_committed";
         const bool is_final_raw = kind_ == L"final_raw";
-        // 现代简洁风格配色
-        D2D1_COLOR_F background_color = D2D1::ColorF(0.98F, 0.98F, 0.98F);  // 浅白背景
-        D2D1_COLOR_F border_color = D2D1::ColorF(0.85F, 0.85F, 0.85F);      // 柔和边框
-        D2D1_COLOR_F text_color = D2D1::ColorF(0.15F, 0.15F, 0.15F);        // 深灰文字
-        float background_opacity = style_.opacity * current_opacity_;
-        float border_opacity = 0.60F * current_opacity_;
-        float shadow_opacity = 0.12F * current_opacity_;
-        float accent_opacity = 0.0F;
+        D2D1_COLOR_F background_color = D2D1::ColorF(0.985F, 0.988F, 0.996F);
+        D2D1_COLOR_F border_color = D2D1::ColorF(0.89F, 0.91F, 0.95F);
+        D2D1_COLOR_F text_color = D2D1::ColorF(0.15F, 0.18F, 0.22F);
+        float background_opacity = style_.opacity * 0.93F * current_opacity_;
+        float border_opacity = 0.24F * current_opacity_;
+        float shadow_opacity = 0.06F * current_opacity_;
+        float text_opacity = current_opacity_;
 
-        if (is_interim) {
-            border_color = D2D1::ColorF(0.30F, 0.55F, 0.85F);                // 蓝色边框（识别中）
-            border_opacity = 0.80F * current_opacity_;
-            accent_opacity = 0.35F * current_opacity_;
+        if (is_listening || is_interim) {
+            border_color = D2D1::ColorF(0.60F, 0.72F, 0.96F);
+            border_opacity = (is_listening ? 0.28F : 0.36F) * current_opacity_;
+            if (is_listening) {
+                background_color = D2D1::ColorF(0.98F, 0.985F, 0.995F);
+                text_color = D2D1::ColorF(0.50F, 0.54F, 0.62F);
+                text_opacity = 0.76F * current_opacity_;
+            }
         } else if (is_polishing) {
-            background_color = D2D1::ColorF(0.96F, 0.94F, 0.90F);           // 淡黄背景
-            border_color = D2D1::ColorF(0.85F, 0.65F, 0.30F);               // 金边框
-            text_color = D2D1::ColorF(0.25F, 0.20F, 0.15F);                 // 深棕文字
+            background_color = D2D1::ColorF(0.97F, 0.95F, 0.90F);
+            border_color = D2D1::ColorF(0.88F, 0.72F, 0.38F);
+            text_color = D2D1::ColorF(0.25F, 0.20F, 0.15F);
             background_opacity = std::min(1.0F, style_.opacity * 0.96F) * current_opacity_;
             border_opacity = 0.85F * current_opacity_;
             shadow_opacity = 0.15F * current_opacity_;
-            accent_opacity = 0.50F * current_opacity_;
         } else if (is_final_committed) {
-            border_color = D2D1::ColorF(0.25F, 0.50F, 0.75F);               // 蓝边框（最终）
-            border_opacity = 0.90F * current_opacity_;
-            accent_opacity = 0.55F * current_opacity_;
+            border_color = D2D1::ColorF(0.60F, 0.69F, 0.87F);
+            border_opacity = 0.32F * current_opacity_;
         } else if (is_final_raw) {
-            border_color = D2D1::ColorF(0.75F, 0.75F, 0.75F);               // 灰边框
-            border_opacity = 0.65F * current_opacity_;
-            accent_opacity = 0.25F * current_opacity_;
-        } else if (is_microphone) {
-            background_color = D2D1::ColorF(0.95F, 0.95F, 0.97F);           // 麦克风模式背景
-            border_color = D2D1::ColorF(0.35F, 0.60F, 0.90F);               // 蓝色边框
-            border_opacity = 0.70F * current_opacity_;
-            shadow_opacity = 0.18F * current_opacity_;
+            border_color = D2D1::ColorF(0.78F, 0.80F, 0.84F);
+            border_opacity = 0.24F * current_opacity_;
         }
 
         background_brush_->SetColor(background_color);
@@ -681,14 +651,13 @@ void OverlayWindow::Render() {
         border_brush_->SetOpacity(border_opacity);
         shadow_brush_->SetOpacity(shadow_opacity);
         text_brush_->SetColor(text_color);
-        text_brush_->SetOpacity(current_opacity_);
+        text_brush_->SetOpacity(text_opacity);
 
         const float scale = DpiScale();
         const float corner_radius = kCornerRadiusDip * scale;
         const float border_width = kBorderWidthDip * scale;
-        const float shadow_offset_y = 6.0F * scale;       // 更柔和的阴影偏移
-        const float shadow_inset = 4.0F * scale;        // 阴影内缩
-        const float accent_height = std::max(2.0F, std::round(2.0F * scale));
+        const float shadow_offset_y = 12.0F * scale;
+        const float shadow_inset = 8.0F * scale;
         const auto rounded_rect = D2D1::RoundedRect(
             D2D1::RectF(0.5F, 0.5F, static_cast<float>(width_px_) - 0.5F, static_cast<float>(height_px_) - 0.5F),
             corner_radius,
@@ -707,44 +676,25 @@ void OverlayWindow::Render() {
 
         dc_render_target_->FillRoundedRectangle(shadow_rect, shadow_brush_.Get());
         dc_render_target_->FillRoundedRectangle(rounded_rect, background_brush_.Get());
-        if (accent_opacity > 0.0F) {
-            border_brush_->SetOpacity(accent_opacity);
-            dc_render_target_->FillRoundedRectangle(
-                D2D1::RoundedRect(
-                    D2D1::RectF(
-                        10.0F * scale,
-                        static_cast<float>(height_px_) - accent_height - 7.0F * scale,
-                        static_cast<float>(width_px_) - 10.0F * scale,
-                        static_cast<float>(height_px_) - 5.0F * scale
-                    ),
-                    accent_height,
-                    accent_height
-                ),
-                border_brush_.Get()
-            );
-            border_brush_->SetOpacity(border_opacity);
-        }
         dc_render_target_->DrawRoundedRectangle(rounded_rect, border_brush_.Get(), border_width);
 
-        // 麦克风模式渲染
-        if (is_microphone) {
-            RenderMicrophoneMode();
-        } else {
-            // 文字渲染
-            const D2D1_POINT_2F text_origin = D2D1::Point2F(kPaddingXDip * scale, kPaddingYDip * scale);
-            if (ShouldAnimateTail() && prefix_layout_ != nullptr) {
-                const auto now = std::chrono::steady_clock::now();
-                const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - tail_animation_started_at_).count();
-                const float pulse = 0.5F + 0.5F * std::sin(static_cast<float>(elapsed_ms) / 120.0F);
-                const float tail_opacity = current_opacity_ * (0.58F + 0.20F * pulse);
-                text_brush_->SetOpacity(tail_opacity);
-                dc_render_target_->DrawTextLayout(text_origin, text_layout_.Get(), text_brush_.Get());
-                text_brush_->SetOpacity(current_opacity_);
-                dc_render_target_->DrawTextLayout(text_origin, prefix_layout_.Get(), text_brush_.Get());
-            } else {
-                text_brush_->SetOpacity(current_opacity_);
-                dc_render_target_->DrawTextLayout(text_origin, text_layout_.Get(), text_brush_.Get());
+        float text_origin_x = kPaddingXDip * scale
+            + (show_microphone_ ? (kMicrophoneCircleSizeDip * scale + kMicrophoneTextGapDip * scale) : 0.0F);
+        float text_origin_y = kPaddingYDip * scale;
+        if (text_layout_ != nullptr) {
+            DWRITE_TEXT_METRICS text_metrics{};
+            if (SUCCEEDED(text_layout_->GetMetrics(&text_metrics))) {
+                text_origin_y = std::max(text_origin_y, (static_cast<float>(height_px_) - text_metrics.height) / 2.0F);
             }
+        }
+        const D2D1_POINT_2F text_origin = D2D1::Point2F(text_origin_x, text_origin_y);
+
+        if (show_microphone_) {
+            RenderMicrophoneHud(kPaddingXDip * scale, kPaddingYDip * scale, current_opacity_);
+        }
+        if (text_layout_ != nullptr) {
+            text_brush_->SetOpacity(text_opacity);
+            dc_render_target_->DrawTextLayout(text_origin, text_layout_.Get(), text_brush_.Get());
         }
 
         hr = dc_render_target_->EndDraw();
@@ -762,13 +712,6 @@ void OverlayWindow::Render() {
     } else {
         Log("render failed hr=" + HrToString(hr));
     }
-}
-
-bool OverlayWindow::ShouldAnimateTail() const {
-    return kind_ == L"interim"
-        && stable_prefix_utf16_len_ < text_.size()
-        && prefix_layout_ != nullptr
-        && current_opacity_ > 0.0F;
 }
 
 void OverlayWindow::ReleaseBitmapResources() {
@@ -807,7 +750,7 @@ void OverlayWindow::StartAnimation(float target_opacity) {
         } else {
             visibility_state_ = VisibilityState::Visible;
             Render();
-            if (ShouldAnimateTail() || IsMicrophoneMode()) {
+            if (show_microphone_) {
                 SetTimer(hwnd_, kAnimationTimerId, 16, nullptr);
             } else {
                 KillTimer(hwnd_, kAnimationTimerId);
@@ -819,7 +762,6 @@ void OverlayWindow::StartAnimation(float target_opacity) {
 }
 
 void OverlayWindow::TickAnimation() {
-    const bool is_microphone = IsMicrophoneMode();
     float t = 1.0F;
 
     if (visibility_state_ == VisibilityState::Showing || visibility_state_ == VisibilityState::Hiding) {
@@ -827,15 +769,13 @@ void OverlayWindow::TickAnimation() {
         const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - animation_started_at_).count();
         const int animation_duration = std::max(style_.animation_ms, 1);
         t = std::clamp(static_cast<float>(elapsed_ms) / static_cast<float>(animation_duration), 0.0F, 1.0F);
-
-        // Back Ease-Out 缓动函数（弹性效果）
-        const float c1 = 1.70158F;
-        const float c3 = c1 + 1.0F;
-        const float eased = 1.0F + c3 * std::pow(t - 1.0F, 3.0F) + c1 * std::pow(t - 1.0F, 2.0F);
-        current_opacity_ = animation_start_opacity_ + (target_opacity_ - animation_start_opacity_) * std::clamp(eased, 0.0F, 1.0F);
+        const float eased = t * t * (3.0F - 2.0F * t);
+        current_opacity_ = animation_start_opacity_ + (target_opacity_ - animation_start_opacity_) * eased;
     } else {
         current_opacity_ = target_opacity_;
     }
+
+    displayed_microphone_level_ += (microphone_level_ - displayed_microphone_level_) * 0.22F;
 
     if (current_opacity_ > 0.0F && !window_visible_) {
         ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
@@ -859,8 +799,7 @@ void OverlayWindow::TickAnimation() {
     const bool keep_timer =
         visibility_state_ == VisibilityState::Showing
         || visibility_state_ == VisibilityState::Hiding
-        || ShouldAnimateTail()
-        || (is_microphone && visibility_state_ != VisibilityState::Hidden && window_visible_);
+        || (show_microphone_ && visibility_state_ != VisibilityState::Hidden && window_visible_);
     if (!keep_timer) {
         KillTimer(hwnd_, kAnimationTimerId);
     }
@@ -883,51 +822,109 @@ float OverlayWindow::DpiScale() const {
     return static_cast<float>(dpi) / 96.0F;
 }
 
-bool OverlayWindow::IsMicrophoneMode() const {
-    return kind_ == L"microphone";
+bool OverlayWindow::ShouldShowMicrophone() const {
+    return show_microphone_;
 }
 
-void OverlayWindow::RenderMicrophoneMode() {
+void OverlayWindow::RenderMicrophoneHud(float left, float top, float opacity) {
     const float scale = DpiScale();
-    const float center_x = static_cast<float>(width_px_) / 2.0F;
-    const float center_y = static_cast<float>(height_px_) / 2.0F;
-
-    // 计算麦克风模式已运行的时间
     const auto now = std::chrono::steady_clock::now();
-    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now - microphone_started_at_
-    ).count();
+    const float elapsed_ms = static_cast<float>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - microphone_started_at_).count()
+    );
+    const float breathing = 0.5F + 0.5F * std::sin(elapsed_ms / 520.0F);
+    const float normalized_level = std::clamp(displayed_microphone_level_ * 3.4F, 0.0F, 1.0F);
+    const float visual_level = std::sqrt(normalized_level);
+    const float circle_size = kMicrophoneCircleSizeDip * scale;
+    const float center_x = left + circle_size / 2.0F;
+    const float center_y = top + (static_cast<float>(height_px_) - top * 2.0F) / 2.0F;
+    const float base_radius = circle_size / 2.0F;
+    const float ambient_glow_radius = base_radius + (6.0F + breathing * 1.4F) * scale;
+    const float response_glow_radius = base_radius + (3.5F + visual_level * 5.0F) * scale;
+    const float core_radius = base_radius - 4.6F * scale + visual_level * 1.2F * scale;
 
-    // 绘制波纹动画
-    DrawRipples(center_x, center_y, static_cast<float>(elapsed_ms));
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> ambient_glow_brush;
+    dc_render_target_->CreateSolidColorBrush(
+        D2D1::ColorF(0.80F, 0.88F, 1.0F, opacity * (0.05F + 0.05F * breathing)),
+        ambient_glow_brush.ReleaseAndGetAddressOf()
+    );
+    dc_render_target_->FillEllipse(
+        D2D1::Ellipse(D2D1::Point2F(center_x, center_y), ambient_glow_radius, ambient_glow_radius),
+        ambient_glow_brush.Get()
+    );
 
-    // 计算麦克风震动偏移
-    const float shake_offset_x = kMicrophoneShakeAmplitude * scale *
-        std::sin(static_cast<float>(elapsed_ms) / 1000.0F * kMicrophoneShakeFrequency * 2.0F * 3.14159F);
-    const float shake_offset_y = kMicrophoneShakeAmplitude * scale * 0.5F *
-        std::cos(static_cast<float>(elapsed_ms) / 1000.0F * kMicrophoneShakeFrequency * 2.5F * 3.14159F);
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> response_glow_brush;
+    dc_render_target_->CreateSolidColorBrush(
+        D2D1::ColorF(0.58F, 0.76F, 1.0F, opacity * (0.07F + 0.12F * visual_level)),
+        response_glow_brush.ReleaseAndGetAddressOf()
+    );
+    dc_render_target_->FillEllipse(
+        D2D1::Ellipse(D2D1::Point2F(center_x, center_y), response_glow_radius, response_glow_radius),
+        response_glow_brush.Get()
+    );
 
-    // 绘制麦克风图标（带震动偏移）
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> shell_brush;
+    dc_render_target_->CreateSolidColorBrush(
+        D2D1::ColorF(0.965F, 0.982F, 1.0F, opacity * 0.92F),
+        shell_brush.ReleaseAndGetAddressOf()
+    );
+    dc_render_target_->FillEllipse(
+        D2D1::Ellipse(D2D1::Point2F(center_x, center_y), base_radius, base_radius),
+        shell_brush.Get()
+    );
+
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> highlight_brush;
+    dc_render_target_->CreateSolidColorBrush(
+        D2D1::ColorF(1.0F, 1.0F, 1.0F, opacity * 0.20F),
+        highlight_brush.ReleaseAndGetAddressOf()
+    );
+    dc_render_target_->FillEllipse(
+        D2D1::Ellipse(
+            D2D1::Point2F(center_x - 4.0F * scale, center_y - 6.0F * scale),
+            base_radius * 0.46F,
+            base_radius * 0.30F
+        ),
+        highlight_brush.Get()
+    );
+
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> ring_brush;
+    dc_render_target_->CreateSolidColorBrush(
+        D2D1::ColorF(0.70F, 0.82F, 1.0F, opacity * (0.16F + 0.16F * visual_level)),
+        ring_brush.ReleaseAndGetAddressOf()
+    );
+    dc_render_target_->DrawEllipse(
+        D2D1::Ellipse(D2D1::Point2F(center_x, center_y), base_radius - 0.5F * scale, base_radius - 0.5F * scale),
+        ring_brush.Get(),
+        (0.75F + visual_level * 0.75F) * scale
+    );
+
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> core_brush;
+    dc_render_target_->CreateSolidColorBrush(
+        D2D1::ColorF(0.76F, 0.86F, 1.0F, opacity * (0.24F + 0.16F * visual_level)),
+        core_brush.ReleaseAndGetAddressOf()
+    );
+    dc_render_target_->FillEllipse(
+        D2D1::Ellipse(D2D1::Point2F(center_x, center_y), core_radius, core_radius),
+        core_brush.Get()
+    );
+
     const float icon_size = kMicrophoneIconSizeDip * scale;
-    DrawMicrophoneIcon(center_x + shake_offset_x, center_y + shake_offset_y, icon_size, current_opacity_);
+    DrawMicrophoneIcon(center_x, center_y, icon_size, opacity * 0.88F);
 }
 
 void OverlayWindow::DrawMicrophoneIcon(float center_x, float center_y, float size, float opacity) {
-    // 麦克风图标绘制（使用 Direct2D 绘制简洁的麦克风形状）
-    const float half_width = size * 0.35F;       // 麦克风头宽度的一半
-    const float head_height = size * 0.55F;      // 麦克风头高度
-    const float stem_width = size * 0.12F;       // 麦克风杆宽度
-    const float stem_height = size * 0.25F;      // 麦克风杆高度
-    const float arc_radius = size * 0.15F;       // 底部弧线半径
+    const float half_width = size * 0.34F;
+    const float head_height = size * 0.60F;
+    const float stem_width = std::max(1.0F, size * 0.12F);
+    const float stem_height = size * 0.22F;
+    const float arc_radius = size * 0.16F;
 
-    // 创建麦克风图标专用画笔（蓝色渐变风格）
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> mic_brush;
     dc_render_target_->CreateSolidColorBrush(
-        D2D1::ColorF(0.30F, 0.55F, 0.85F, opacity),
+        D2D1::ColorF(0.17F, 0.25F, 0.38F, opacity),
         mic_brush.ReleaseAndGetAddressOf()
     );
 
-    // 麦克风头（圆角矩形）
     const float head_top = center_y - head_height * 0.6F;
     const D2D1_RECT_F head_rect = D2D1::RectF(
         center_x - half_width,
@@ -938,7 +935,6 @@ void OverlayWindow::DrawMicrophoneIcon(float center_x, float center_y, float siz
     const D2D1_ROUNDED_RECT head_rounded = D2D1::RoundedRect(head_rect, half_width, half_width);
     dc_render_target_->FillRoundedRectangle(head_rounded, mic_brush.Get());
 
-    // 麦克风杆（矩形）
     const float stem_top = head_top + head_height - 2.0F;
     dc_render_target_->FillRectangle(
         D2D1::RectF(
@@ -950,7 +946,6 @@ void OverlayWindow::DrawMicrophoneIcon(float center_x, float center_y, float siz
         mic_brush.Get()
     );
 
-    // 底部弧线（使用椭圆的上半部分模拟）
     const float arc_center_y = stem_top + stem_height + arc_radius * 0.3F;
     const D2D1_ELLIPSE arc_ellipse = D2D1::Ellipse(
         D2D1::Point2F(center_x, arc_center_y),
@@ -959,7 +954,6 @@ void OverlayWindow::DrawMicrophoneIcon(float center_x, float center_y, float siz
     );
     dc_render_target_->DrawEllipse(arc_ellipse, mic_brush.Get(), stem_width);
 
-    // 麦克风底部小横线（表示支架）
     dc_render_target_->FillRectangle(
         D2D1::RectF(
             center_x - half_width * 1.3F,
@@ -969,39 +963,6 @@ void OverlayWindow::DrawMicrophoneIcon(float center_x, float center_y, float siz
         ),
         mic_brush.Get()
     );
-}
-
-void OverlayWindow::DrawRipples(float center_x, float center_y, float elapsed_ms) {
-    const float scale = DpiScale();
-    const float max_radius = kRippleMaxRadiusDip * scale;
-
-    // 创建波纹画笔（半透明蓝色）
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> ripple_brush;
-    dc_render_target_->CreateSolidColorBrush(
-        D2D1::ColorF(0.30F, 0.55F, 0.85F, 0.0F),
-        ripple_brush.ReleaseAndGetAddressOf()
-    );
-
-    // 绘制多个波纹（错开相位）
-    for (int i = 0; i < kRippleCount; ++i) {
-        // 计算当前波纹的相位（错开启动时间）
-        const float phase_offset = static_cast<float>(i) / static_cast<float>(kRippleCount);
-        const float phase = std::fmod(elapsed_ms / kRippleDurationMs + phase_offset, 1.0F);
-
-        // 波纹从中心向外扩散，透明度随距离衰减
-        const float radius = phase * max_radius;
-        const float opacity = current_opacity_ * (1.0F - phase) * 0.35F;
-
-        if (opacity > 0.01F && radius > 1.0F) {
-            ripple_brush->SetOpacity(opacity);
-            const D2D1_ELLIPSE ripple_ellipse = D2D1::Ellipse(
-                D2D1::Point2F(center_x, center_y),
-                radius,
-                radius
-            );
-            dc_render_target_->DrawEllipse(ripple_ellipse, ripple_brush.Get(), 2.0F * scale);
-        }
-    }
 }
 
 }  // namespace overlay_ui

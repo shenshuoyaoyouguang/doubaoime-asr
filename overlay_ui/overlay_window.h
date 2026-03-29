@@ -21,14 +21,11 @@ constexpr UINT WM_APP_OVERLAY_HIDE = WM_APP + 2;
 constexpr UINT WM_APP_OVERLAY_STOP = WM_APP + 3;
 constexpr UINT WM_APP_OVERLAY_CONFIGURE = WM_APP + 4;
 
-// 麦克风模式相关常量
-constexpr float kMicrophoneBoxSizeDip = 160.0F;        // 麦克风框尺寸
-constexpr float kMicrophoneIconSizeDip = 48.0F;        // 麦克风图标尺寸
-constexpr float kRippleMaxRadiusDip = 80.0F;           // 波纹最大半径
-constexpr float kRippleDurationMs = 2000.0F;           // 波纹周期（毫秒）
-constexpr int kRippleCount = 3;                        // 波纹数量
-constexpr float kMicrophoneShakeAmplitude = 2.0F;      // 麦克风震动幅度
-constexpr float kMicrophoneShakeFrequency = 8.0F;      // 麦克风震动频率（Hz）
+// 统一录音 HUD 常量
+constexpr float kMicrophoneCircleSizeDip = 40.0F;
+constexpr float kMicrophoneIconSizeDip = 16.0F;
+constexpr float kMicrophoneTextGapDip = 12.0F;
+constexpr float kHudMinTextWidthDip = 208.0F;
 
 struct OverlayStyle {
     float font_size = 14.0F;
@@ -45,6 +42,8 @@ struct OverlayShowPayload {
     unsigned long long seq = 0;
     std::wstring kind = L"interim";
     unsigned long long stable_prefix_utf16_len = 0;
+    bool show_microphone = false;
+    float level = 0.0F;
 };
 
 class OverlayWindow {
@@ -88,13 +87,11 @@ private:
     void UpdateGeometry();
     void ReleaseBitmapResources();
     void Render();
-    bool ShouldAnimateTail() const;
-    bool IsMicrophoneMode() const;
+    bool ShouldShowMicrophone() const;
     void StartAnimation(float target_opacity);
     void TickAnimation();
     void DrawMicrophoneIcon(float center_x, float center_y, float size, float opacity);
-    void DrawRipples(float center_x, float center_y, float elapsed_ms);
-    void RenderMicrophoneMode();
+    void RenderMicrophoneHud(float left, float top, float opacity);
     void Log(const std::string& message) const;
     float DpiScale() const;
 
@@ -107,15 +104,16 @@ private:
 
     std::wstring text_;
     std::wstring kind_ = L"interim";
+    bool show_microphone_ = false;
     unsigned long long stable_prefix_utf16_len_ = 0;
     unsigned long long last_seq_ = 0;
+    float microphone_level_ = 0.0F;
+    float displayed_microphone_level_ = 0.0F;
     float current_opacity_ = 0.0F;
     float target_opacity_ = 0.0F;
     float animation_start_opacity_ = 0.0F;
     std::chrono::steady_clock::time_point animation_started_at_{};
-    std::chrono::steady_clock::time_point tail_animation_started_at_{};
-    std::chrono::steady_clock::time_point microphone_started_at_{};  // 麦克风模式开始时间
-    std::chrono::steady_clock::time_point highlight_started_at_{};   // 高亮动画开始时间
+    std::chrono::steady_clock::time_point microphone_started_at_{};
     int width_px_ = 0;
     int height_px_ = 0;
     int x_px_ = 0;
