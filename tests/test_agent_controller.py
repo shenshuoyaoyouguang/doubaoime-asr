@@ -1,4 +1,14 @@
 import sys
+import types
+
+
+if "pywinauto" not in sys.modules:
+    pywinauto_stub = types.ModuleType("pywinauto")
+    pywinauto_stub.Desktop = object
+    keyboard_stub = types.ModuleType("pywinauto.keyboard")
+    keyboard_stub.send_keys = lambda *args, **kwargs: None
+    sys.modules["pywinauto"] = pywinauto_stub
+    sys.modules["pywinauto.keyboard"] = keyboard_stub
 
 from doubaoime_asr.agent.config import AgentConfig
 from doubaoime_asr.agent.stable_simple_app import StableVoiceInputApp

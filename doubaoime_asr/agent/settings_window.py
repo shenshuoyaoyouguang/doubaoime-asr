@@ -7,10 +7,15 @@ from typing import Callable, Mapping
 
 from .config import (
     AgentConfig,
+    DEFAULT_OLLAMA_BASE_URL,
     INJECTION_POLICY_DIRECT_ONLY,
     INJECTION_POLICY_DIRECT_THEN_CLIPBOARD,
+    POLISH_MODE_LIGHT,
+    POLISH_MODE_OFF,
+    POLISH_MODE_OLLAMA,
     SUPPORTED_INJECTION_POLICIES,
     SUPPORTED_MODES,
+    SUPPORTED_POLISH_MODES,
 )
 from .win_hotkey import normalize_hotkey, vk_from_hotkey, vk_to_display, vk_to_hotkey
 from .win_keyboard_hook import SingleKeyRecorder
@@ -24,6 +29,17 @@ MODE_OPTIONS: list[tuple[str, str]] = [
 INJECTION_POLICY_OPTIONS: list[tuple[str, str]] = [
     (INJECTION_POLICY_DIRECT_THEN_CLIPBOARD, "智能兼容（默认，失败时用剪贴板）"),
     (INJECTION_POLICY_DIRECT_ONLY, "仅直接输入（绝不动剪贴板）"),
+]
+
+POLISH_MODE_OPTIONS: list[tuple[str, str]] = [
+    (POLISH_MODE_LIGHT, "轻量整理（推荐）"),
+    (POLISH_MODE_OFF, "关闭"),
+    (POLISH_MODE_OLLAMA, "Ollama 本地润色（较慢）"),
+]
+
+WARMUP_OPTIONS: list[tuple[str, str]] = [
+    ("true", "开启预热（推荐）"),
+    ("false", "按需加载"),
 ]
 
 
@@ -86,6 +102,10 @@ def build_config_from_settings_values(
     if injection_policy not in SUPPORTED_INJECTION_POLICIES:
         raise SettingsValidationError("注入策略无效")
 
+    polish_mode = values.get("polish_mode", "")
+    if polish_mode not in SUPPORTED_POLISH_MODES:
+        raise SettingsValidationError("润色模式无效")
+
     return replace(
         base_config,
         hotkey=hotkey,
@@ -95,6 +115,15 @@ def build_config_from_settings_values(
         microphone_device=_parse_microphone_value(values.get("microphone_device", "__default__")),
         injection_policy=injection_policy,
         render_debounce_ms=_parse_int(values.get("render_debounce_ms", ""), "流式防抖", 0, 1000),
+        polish_mode=polish_mode,
+        ollama_base_url=_parse_optional_text(
+            values.get("ollama_base_url", ""),
+            default=DEFAULT_OLLAMA_BASE_URL,
+            strip_trailing_slash=True,
+        ),
+        ollama_model=_parse_optional_text(values.get("ollama_model", "")),
+        polish_timeout_ms=_parse_int(values.get("polish_timeout_ms", ""), "润色超时", 100, 5000),
+        ollama_warmup_enabled=_parse_bool_choice(values.get("ollama_warmup_enabled", "true"), "模型预热"),
         overlay_render_fps=_parse_int(values.get("overlay_render_fps", ""), "显示帧率", 1, 120),
         overlay_font_size=_parse_int(values.get("overlay_font_size", ""), "字体大小", 10, 36),
         overlay_max_width=_parse_int(values.get("overlay_max_width", ""), "最大宽度", 320, 1200),
@@ -124,6 +153,22 @@ def _parse_microphone_value(raw: str) -> int | str | None:
         name = value.split(":", 1)[1]
         return name or None
     return int(value) if value.isdigit() else value
+
+
+def _parse_optional_text(raw: str, *, default: str = "", strip_trailing_slash: bool = False) -> str:
+    value = raw.strip()
+    if strip_trailing_slash:
+        value = value.rstrip("/")
+    return value or default
+
+
+def _parse_bool_choice(raw: str, label: str) -> bool:
+    normalized = raw.strip().casefold()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise SettingsValidationError(f"{label}无效")
 
 
 class SettingsWindowController:
@@ -212,7 +257,7 @@ class SettingsWindowController:
             win32con.CW_USEDEFAULT,
             win32con.CW_USEDEFAULT,
             540,
-            480,
+            620,
             0,
             0,
             wndclass.hInstance,
@@ -341,6 +386,11 @@ class SettingsWindowController:
             ("microphone_device", "麦克风", "combo"),
             ("render_debounce_ms", "流式防抖(ms)", "edit"),
             ("injection_policy", "注入策略", "combo"),
+            ("polish_mode", "最终润色", "combo"),
+            ("ollama_base_url", "Ollama 地址", "edit"),
+            ("ollama_model", "Ollama 模型", "edit"),
+            ("polish_timeout_ms", "润色超时(ms)", "edit"),
+            ("ollama_warmup_enabled", "模型预热", "combo"),
             ("overlay_render_fps", "显示帧率(FPS)", "edit"),
             ("overlay_font_size", "字体大小", "edit"),
             ("overlay_max_width", "最大宽度(px)", "edit"),
@@ -403,12 +453,12 @@ class SettingsWindowController:
         hint_handle = win32gui.CreateWindowEx(
             0,
             "STATIC",
-            "热键支持录制任意单键；终端类窗口建议保留智能兼容注入。",
+            "热键支持录制任意单键；Ollama 润色只处理最终结果，失败会自动回退原文。",
             win32con.WS_CHILD | win32con.WS_VISIBLE,
             label_x,
             row_y + (len(rows) + 1) * row_step + 4,
             480,
-            36,
+            40,
             hwnd,
             0,
             0,
@@ -422,7 +472,7 @@ class SettingsWindowController:
             "保存",
             win32con.WS_CHILD | win32con.WS_VISIBLE | win32con.WS_TABSTOP | win32con.BS_DEFPUSHBUTTON,
             300,
-            424,
+            548,
             90,
             28,
             hwnd,
@@ -436,7 +486,7 @@ class SettingsWindowController:
             "取消",
             win32con.WS_CHILD | win32con.WS_VISIBLE | win32con.WS_TABSTOP,
             400,
-            424,
+            548,
             90,
             28,
             hwnd,
@@ -460,8 +510,17 @@ class SettingsWindowController:
         self._set_combo_items("mode", MODE_OPTIONS, config.mode)
         self._set_combo_items("microphone_device", list_microphone_choices(config.microphone_device), _microphone_choice_value(config.microphone_device))
         self._set_combo_items("injection_policy", INJECTION_POLICY_OPTIONS, config.injection_policy)
+        self._set_combo_items("polish_mode", POLISH_MODE_OPTIONS, config.polish_mode)
+        self._set_combo_items(
+            "ollama_warmup_enabled",
+            WARMUP_OPTIONS,
+            "true" if config.ollama_warmup_enabled else "false",
+        )
 
         win32gui.SetWindowText(self._controls["render_debounce_ms"], str(config.render_debounce_ms))
+        win32gui.SetWindowText(self._controls["ollama_base_url"], config.ollama_base_url)
+        win32gui.SetWindowText(self._controls["ollama_model"], config.ollama_model)
+        win32gui.SetWindowText(self._controls["polish_timeout_ms"], str(config.polish_timeout_ms))
         win32gui.SetWindowText(self._controls["overlay_render_fps"], str(config.overlay_render_fps))
         win32gui.SetWindowText(self._controls["overlay_font_size"], str(config.overlay_font_size))
         win32gui.SetWindowText(self._controls["overlay_max_width"], str(config.overlay_max_width))
@@ -509,6 +568,9 @@ class SettingsWindowController:
             "hotkey_vk": str(self._recorded_hotkey_vk),
             "hotkey_display": self._recorded_hotkey_display,
             "render_debounce_ms": win32gui.GetWindowText(self._controls["render_debounce_ms"]),
+            "ollama_base_url": win32gui.GetWindowText(self._controls["ollama_base_url"]),
+            "ollama_model": win32gui.GetWindowText(self._controls["ollama_model"]),
+            "polish_timeout_ms": win32gui.GetWindowText(self._controls["polish_timeout_ms"]),
             "overlay_render_fps": win32gui.GetWindowText(self._controls["overlay_render_fps"]),
             "overlay_font_size": win32gui.GetWindowText(self._controls["overlay_font_size"]),
             "overlay_max_width": win32gui.GetWindowText(self._controls["overlay_max_width"]),
@@ -517,7 +579,7 @@ class SettingsWindowController:
             "overlay_animation_ms": win32gui.GetWindowText(self._controls["overlay_animation_ms"]),
         }
 
-        for name in ("mode", "microphone_device", "injection_policy"):
+        for name in ("mode", "microphone_device", "injection_policy", "polish_mode", "ollama_warmup_enabled"):
             combo_handle = self._controls[name]
             index = int(win32gui.SendMessage(combo_handle, win32con.CB_GETCURSEL, 0, 0))
             values[name] = self._combo_values[name][index] if index >= 0 else ""

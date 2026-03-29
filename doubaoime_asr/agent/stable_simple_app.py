@@ -11,7 +11,7 @@ import sys
 import threading
 from typing import Literal
 
-from .config import AgentConfig, SUPPORTED_INJECTION_POLICIES
+from .config import AgentConfig, POLISH_MODE_OLLAMA, SUPPORTED_INJECTION_POLICIES, SUPPORTED_POLISH_MODES
 from .injection_manager import TextInjectionManager
 from .input_injector import FocusChangedError, FocusTarget
 from .overlay_preview import OverlayPreview
@@ -19,6 +19,7 @@ from .overlay_scheduler import OverlayRenderScheduler
 from .protocol import decode_event
 from .runtime_logging import setup_named_logger
 from .settings_window import SettingsWindowController
+from .text_polisher import PolishResult, TextPolisher
 from .win_keyboard_hook import GlobalHotkeyHook
 from .win_hotkey import normalize_hotkey, vk_from_hotkey, vk_to_display, vk_to_hotkey
 
@@ -87,6 +88,7 @@ class StableVoiceInputApp:
             logger=self.logger,
             fps=self.config.overlay_render_fps,
         )
+        self.text_polisher = TextPolisher(self.logger, self.config)
 
         self._status = "空闲"
         self._status_lock = threading.Lock()
@@ -100,7 +102,9 @@ class StableVoiceInputApp:
         self._settings_controller: SettingsWindowController | None = None
         self._pending_listener_rebind = False
         self._pending_worker_restart = False
+        self._pending_polisher_warmup = False
         self._next_worker_session_id = 0
+        self._polisher_warmup_task: asyncio.Task[None] | None = None
 
     def set_status(self, value: str) -> None:
         with self._status_lock:
@@ -149,6 +153,7 @@ class StableVoiceInputApp:
         self._loop = loop
         self._listener = self._build_listener(loop, self.config.effective_hotkey_vk())
         self._listener.start()
+        self._schedule_polisher_warmup("startup")
         self._settings_controller = SettingsWindowController(
             logger=self.logger,
             get_current_config=lambda: self.config,
@@ -190,6 +195,7 @@ class StableVoiceInputApp:
         except KeyboardInterrupt:
             self.stop()
         finally:
+            await self._cancel_polisher_warmup()
             await self._terminate_worker()
             if self._listener is not None:
                 self._listener.stop()
@@ -405,12 +411,13 @@ class StableVoiceInputApp:
                 await self.overlay_scheduler.submit_interim(text)
                 self.set_status(f"识别中: {text[-24:]}")
         elif event_type == "final":
-            text = str(event.get("text", ""))
-            if self.console:
-                print(f"\r[最终] {text}          ", flush=True)
             await self.overlay_scheduler.hide("final")
-            await self._inject_final(text)
-            self.set_status(f"最终结果: {text[-24:]}")
+            raw_text = str(event.get("text", ""))
+            result = await self._resolve_final_text(raw_text)
+            self.set_status(self._status_for_final_result(result, raw_text))
+            if self.console:
+                print(f"\r[最终] {result.text}          ", flush=True)
+            await self._inject_final(result.text)
         elif event_type == "error":
             await self.overlay_scheduler.hide("error")
             message = str(event.get("message", "语音识别失败"))
@@ -443,6 +450,26 @@ class StableVoiceInputApp:
             self.logger.exception("inject_final_failed")
             self.set_status("注入失败，仅保留识别")
 
+    async def _resolve_final_text(self, raw_text: str) -> PolishResult:
+        if self.config.polish_mode != POLISH_MODE_OLLAMA or not raw_text.strip():
+            return await self.text_polisher.polish(raw_text)
+        self.set_status("润色中…")
+        return await self.text_polisher.polish(raw_text)
+
+    def _status_for_final_result(self, result: PolishResult, raw_text: str) -> str:
+        if result.applied_mode != "raw_fallback":
+            return f"最终结果: {result.text[-24:]}"
+
+        excerpt = raw_text[-18:]
+        fallback_messages = {
+            "timeout": f"润色超时，已使用原文: {excerpt}",
+            "unavailable": f"润色不可用，已使用原文: {excerpt}",
+            "no_model": f"未配置润色模型，已使用原文: {excerpt}",
+            "invalid_response": f"润色结果无效，已使用原文: {excerpt}",
+            "bad_prompt": f"润色提示词无效，已使用原文: {excerpt}",
+        }
+        return fallback_messages.get(result.fallback_reason or "", f"最终结果: {result.text[-24:]}")
+
     async def _handle_worker_exit(self, session_id: int, code: int) -> None:
         if self._session is None or self._session.session_id != session_id:
             self.logger.info(
@@ -471,6 +498,9 @@ class StableVoiceInputApp:
         if self._pending_worker_restart:
             self._pending_worker_restart = False
             await self._restart_worker()
+        if self._pending_polisher_warmup:
+            self._pending_polisher_warmup = False
+            self._schedule_polisher_warmup("after_session")
 
     def _apply_pending_listener_rebind(self, log_tag: str) -> None:
         if not self._pending_listener_rebind:
@@ -526,6 +556,39 @@ class StableVoiceInputApp:
         if not self._stopping:
             await self._ensure_worker()
 
+    def _schedule_polisher_warmup(self, reason: str) -> None:
+        if self._loop is None:
+            return
+        if self._polisher_warmup_task is not None and not self._polisher_warmup_task.done():
+            self._polisher_warmup_task.cancel()
+        if self.config.polish_mode != POLISH_MODE_OLLAMA or not self.config.ollama_warmup_enabled:
+            self._polisher_warmup_task = None
+            return
+        self._polisher_warmup_task = asyncio.create_task(self._run_polisher_warmup(reason))
+
+    async def _run_polisher_warmup(self, reason: str) -> None:
+        try:
+            warmed = await self.text_polisher.warmup()
+            self.logger.info("text_polisher_warmup_finished reason=%s warmed=%s", reason, warmed)
+        except asyncio.CancelledError:
+            self.logger.info("text_polisher_warmup_cancelled reason=%s", reason)
+            raise
+        except Exception:
+            self.logger.exception("text_polisher_warmup_failed reason=%s", reason)
+        finally:
+            current_task = asyncio.current_task()
+            if self._polisher_warmup_task is current_task:
+                self._polisher_warmup_task = None
+
+    async def _cancel_polisher_warmup(self) -> None:
+        if self._polisher_warmup_task is None or self._polisher_warmup_task.done():
+            self._polisher_warmup_task = None
+            return
+        self._polisher_warmup_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._polisher_warmup_task
+        self._polisher_warmup_task = None
+
     def stop(self) -> None:
         self._stopping = True
         with contextlib.suppress(Exception):
@@ -553,11 +616,13 @@ class StableVoiceInputApp:
         old_mode = self.mode
         old_pending_listener_rebind = self._pending_listener_rebind
         old_pending_worker_restart = self._pending_worker_restart
+        old_pending_polisher_warmup = self._pending_polisher_warmup
         hotkey_changed = old_config.effective_hotkey_vk() != new_config.effective_hotkey_vk()
         worker_changed = (
             old_config.credential_path != new_config.credential_path
             or old_config.microphone_device != new_config.microphone_device
         )
+        polisher_changed = self._polisher_config_changed(old_config, new_config)
         session_active = self._session is not None and self._session.active
         listener_rebound = False
         worker_restarted = False
@@ -568,6 +633,7 @@ class StableVoiceInputApp:
             self.injection_manager.set_policy(new_config.injection_policy)
             self.preview.configure(new_config)
             self.overlay_scheduler.configure(new_config)
+            self.text_polisher.configure(new_config)
 
             if hotkey_changed:
                 if session_active:
@@ -582,6 +648,11 @@ class StableVoiceInputApp:
                 else:
                     await self._restart_worker()
                     worker_restarted = True
+            if polisher_changed:
+                if session_active:
+                    self._pending_polisher_warmup = True
+                else:
+                    self._schedule_polisher_warmup("config_update")
 
             self.config.save()
         except Exception:
@@ -590,9 +661,11 @@ class StableVoiceInputApp:
             self.mode = old_mode
             self._pending_listener_rebind = old_pending_listener_rebind
             self._pending_worker_restart = old_pending_worker_restart
+            self._pending_polisher_warmup = old_pending_polisher_warmup
             self.injection_manager.set_policy(old_config.injection_policy)
             self.preview.configure(old_config)
             self.overlay_scheduler.configure(old_config)
+            self.text_polisher.configure(old_config)
             if listener_rebound:
                 try:
                     self._rebind_listener(old_config.effective_hotkey_vk())
@@ -621,10 +694,25 @@ class StableVoiceInputApp:
                 self.set_status(f"热键已更新为 {new_config.effective_hotkey_display()}")
             elif worker_changed:
                 self.set_status("设置已保存并重启识别服务")
+            elif polisher_changed:
+                self.set_status("设置已保存并更新润色配置")
             else:
                 self.set_status("设置已保存")
         else:
             self.logger.info("settings_saved_during_active_session")
+
+    def _polisher_config_changed(self, old_config: AgentConfig, new_config: AgentConfig) -> bool:
+        return any(
+            (
+                old_config.polish_mode != new_config.polish_mode,
+                old_config.ollama_base_url != new_config.ollama_base_url,
+                old_config.ollama_model != new_config.ollama_model,
+                old_config.polish_timeout_ms != new_config.polish_timeout_ms,
+                old_config.ollama_warmup_enabled != new_config.ollama_warmup_enabled,
+                old_config.ollama_keep_alive != new_config.ollama_keep_alive,
+                old_config.ollama_prompt_template != new_config.ollama_prompt_template,
+            )
+        )
 
     def _start_tray(self, loop: asyncio.AbstractEventLoop) -> None:
         import pystray
@@ -687,6 +775,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=argparse.SUPPRESS,
         help="direct_only 仅直接输入；direct_then_clipboard 失败时允许剪贴板回退",
     )
+    parser.add_argument(
+        "--polish-mode",
+        choices=SUPPORTED_POLISH_MODES,
+        default=argparse.SUPPRESS,
+        help="light 轻量整理（推荐）；off 关闭；ollama 使用本地 Ollama 模型润色最终结果（较慢）",
+    )
+    parser.add_argument("--ollama-base-url", help="本地 Ollama 服务地址，默认 http://localhost:11434")
+    parser.add_argument("--ollama-model", help="本地 Ollama 模型名，为空时仅在唯一模型场景下自动探测")
+    parser.add_argument("--polish-timeout-ms", type=int, help="最终结果润色超时毫秒数")
+    parser.add_argument("--ollama-keep-alive", help="Ollama 模型保温时长，例如 15m")
+    parser.add_argument("--disable-ollama-warmup", action="store_true", help="关闭程序启动后的 Ollama 模型预热")
     parser.add_argument("--render-debounce-ms", type=int, help="流式渲染防抖毫秒数")
     parser.add_argument("--console", action="store_true", help="显示控制台输出，便于调试")
     parser.add_argument("--no-tray", action="store_true", help="禁用系统托盘，仅作为前台常驻工具运行")
@@ -717,6 +816,18 @@ def build_config_from_args(args: argparse.Namespace | None = None) -> AgentConfi
         config.credential_path = args.credential_path
     if getattr(args, "injection_policy", None):
         config.injection_policy = args.injection_policy
+    if getattr(args, "polish_mode", None):
+        config.polish_mode = args.polish_mode
+    if getattr(args, "ollama_base_url", None):
+        config.ollama_base_url = str(args.ollama_base_url).rstrip("/") or config.ollama_base_url
+    if getattr(args, "ollama_model", None) is not None:
+        config.ollama_model = str(args.ollama_model).strip()
+    if getattr(args, "polish_timeout_ms", None) is not None:
+        config.polish_timeout_ms = args.polish_timeout_ms
+    if getattr(args, "ollama_keep_alive", None):
+        config.ollama_keep_alive = args.ollama_keep_alive
+    if getattr(args, "disable_ollama_warmup", False):
+        config.ollama_warmup_enabled = False
     if getattr(args, "render_debounce_ms", None) is not None:
         config.render_debounce_ms = args.render_debounce_ms
     return config

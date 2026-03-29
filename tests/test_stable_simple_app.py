@@ -18,7 +18,8 @@ if "pywinauto" not in sys.modules:
     sys.modules["pywinauto.keyboard"] = keyboard_stub
 
 from doubaoime_asr.agent import stable_simple_app
-from doubaoime_asr.agent.config import AgentConfig, INJECTION_POLICY_DIRECT_ONLY
+from doubaoime_asr.agent.config import AgentConfig, INJECTION_POLICY_DIRECT_ONLY, POLISH_MODE_OLLAMA
+from doubaoime_asr.agent.text_polisher import PolishResult
 
 
 class _DummyInjectionManager:
@@ -51,8 +52,31 @@ class _DummyScheduler:
     def configure(self, config: AgentConfig) -> None:
         self.configured.append(config)
 
+    async def submit_interim(self, text: str) -> None:
+        return None
+
     async def hide(self, reason: str) -> None:
         return None
+
+
+class _DummyPolisher:
+    def __init__(self, logger, config: AgentConfig) -> None:
+        self.logger = logger
+        self.config = config
+        self.result = PolishResult(text="", applied_mode="off", latency_ms=0)
+        self.warmup_calls: list[bool] = []
+
+    def configure(self, config: AgentConfig) -> None:
+        self.config = config
+
+    async def polish(self, text: str) -> PolishResult:
+        if self.result.text:
+            return self.result
+        return PolishResult(text=text, applied_mode=self.config.polish_mode, latency_ms=0)
+
+    async def warmup(self) -> bool:
+        self.warmup_calls.append(True)
+        return True
 
 
 def _build_app(monkeypatch: pytest.MonkeyPatch, config: AgentConfig | None = None) -> stable_simple_app.StableVoiceInputApp:
@@ -60,6 +84,7 @@ def _build_app(monkeypatch: pytest.MonkeyPatch, config: AgentConfig | None = Non
     monkeypatch.setattr(stable_simple_app, "TextInjectionManager", _DummyInjectionManager)
     monkeypatch.setattr(stable_simple_app, "OverlayPreview", _DummyPreview)
     monkeypatch.setattr(stable_simple_app, "OverlayRenderScheduler", _DummyScheduler)
+    monkeypatch.setattr(stable_simple_app, "TextPolisher", _DummyPolisher)
     return stable_simple_app.StableVoiceInputApp(config or AgentConfig(), enable_tray=False)
 
 
@@ -227,3 +252,46 @@ def test_apply_config_rolls_back_runtime_changes_after_save_failure(monkeypatch:
     assert app.preview.configured[-1] == old_config
     assert app.overlay_scheduler.configured[-1] == old_config
     assert app._status == "\u8bbe\u7f6e\u4fdd\u5b58\u5931\u8d25\uff0c\u5df2\u6062\u590d\u65e7\u914d\u7f6e"
+
+
+def test_handle_worker_final_uses_polished_text(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(polish_mode=POLISH_MODE_OLLAMA)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(3)
+    session.active = True
+    session.mode = "recognize"
+    app._session = session
+    app.text_polisher.result = PolishResult(text="润色后的文本。", applied_mode="ollama", latency_ms=120)
+
+    injected: list[str] = []
+
+    async def fake_inject(text: str) -> None:
+        injected.append(text)
+
+    monkeypatch.setattr(app, "_inject_final", fake_inject)
+
+    asyncio.run(app._handle_worker_event(3, {"type": "final", "text": "原文"}))
+
+    assert injected == ["润色后的文本。"]
+    assert app._status == "最终结果: 润色后的文本。"
+
+
+def test_handle_worker_final_fallback_status_uses_raw_text(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(polish_mode=POLISH_MODE_OLLAMA)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(4)
+    session.active = True
+    session.mode = "recognize"
+    app._session = session
+    app.text_polisher.result = PolishResult(
+        text="原始识别文本",
+        applied_mode="raw_fallback",
+        latency_ms=800,
+        fallback_reason="timeout",
+    )
+
+    monkeypatch.setattr(app, "_inject_final", lambda text: asyncio.sleep(0))
+
+    asyncio.run(app._handle_worker_event(4, {"type": "final", "text": "原始识别文本"}))
+
+    assert app._status == "润色超时，已使用原文: 原始识别文本"
