@@ -451,9 +451,8 @@ class StableVoiceInputApp:
             self.set_status("注入失败，仅保留识别")
 
     async def _resolve_final_text(self, raw_text: str) -> PolishResult:
-        if self.config.polish_mode != POLISH_MODE_OLLAMA or not raw_text.strip():
-            return await self.text_polisher.polish(raw_text)
-        self.set_status("润色中…")
+        if self.config.polish_mode == POLISH_MODE_OLLAMA and raw_text.strip():
+            self.set_status("润色中…")
         return await self.text_polisher.polish(raw_text)
 
     def _status_for_final_result(self, result: PolishResult, raw_text: str) -> str:
@@ -819,7 +818,7 @@ def build_config_from_args(args: argparse.Namespace | None = None) -> AgentConfi
     if getattr(args, "polish_mode", None):
         config.polish_mode = args.polish_mode
     if getattr(args, "ollama_base_url", None):
-        config.ollama_base_url = str(args.ollama_base_url).rstrip("/") or config.ollama_base_url
+        config.ollama_base_url = str(args.ollama_base_url).strip().rstrip("/") or config.ollama_base_url
     if getattr(args, "ollama_model", None) is not None:
         config.ollama_model = str(args.ollama_model).strip()
     if getattr(args, "polish_timeout_ms", None) is not None:

@@ -125,6 +125,37 @@ def test_polish_ollama_without_model_falls_back(monkeypatch):
     assert result.text == "原文"
 
 
+def test_polish_ollama_retries_model_detection_after_no_model(monkeypatch):
+    polisher = TextPolisher(
+        logging.getLogger("polisher-test"),
+        AgentConfig(polish_mode=POLISH_MODE_OLLAMA, ollama_model=""),
+    )
+    tag_payloads = [
+        {"models": []},
+        {"models": [{"name": "qwen2.5:3b"}]},
+    ]
+    seen_get_calls: list[str] = []
+
+    def fake_get(url, timeout):
+        seen_get_calls.append(url)
+        return _Response(tag_payloads.pop(0))
+
+    def fake_post(url, json, timeout):
+        return _Response({"response": f"{json['model']}::润色结果"})
+
+    monkeypatch.setattr("doubaoime_asr.agent.text_polisher.requests.get", fake_get)
+    monkeypatch.setattr("doubaoime_asr.agent.text_polisher.requests.post", fake_post)
+
+    first = asyncio.run(polisher.polish("原文"))
+    second = asyncio.run(polisher.polish("原文"))
+
+    assert first.applied_mode == "raw_fallback"
+    assert first.fallback_reason == "no_model"
+    assert second.applied_mode == POLISH_MODE_OLLAMA
+    assert second.text == "qwen2.5:3b::润色结果"
+    assert len(seen_get_calls) == 2
+
+
 def test_warmup_uses_unique_local_model(monkeypatch):
     polisher = TextPolisher(
         logging.getLogger("polisher-test"),

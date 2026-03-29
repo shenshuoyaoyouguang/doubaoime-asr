@@ -11,10 +11,12 @@ if "pywinauto" not in sys.modules:
     sys.modules["pywinauto.keyboard"] = keyboard_stub
 
 
+from doubaoime_asr.agent.config import AgentConfig
 from doubaoime_asr.agent.stable_simple_app import build_arg_parser, build_config_from_args
 
 
-def test_stable_cli_defaults_to_recognize():
+def test_stable_cli_defaults_to_recognize(monkeypatch):
+    monkeypatch.setattr(AgentConfig, "load", classmethod(lambda cls, path=None: cls.default()))
     parser = build_arg_parser()
     args = parser.parse_args([])
     config = build_config_from_args(args)
@@ -23,7 +25,8 @@ def test_stable_cli_defaults_to_recognize():
     assert config.polish_mode == "light"
 
 
-def test_stable_cli_config_override():
+def test_stable_cli_config_override(monkeypatch):
+    monkeypatch.setattr(AgentConfig, "load", classmethod(lambda cls, path=None: cls.default()))
     parser = build_arg_parser()
     args = parser.parse_args(
         [
@@ -36,7 +39,7 @@ def test_stable_cli_config_override():
             "--polish-mode",
             "ollama",
             "--ollama-base-url",
-            "http://127.0.0.1:11434/",
+            "  http://127.0.0.1:11434/  ",
             "--ollama-model",
             "qwen2.5:3b",
             "--polish-timeout-ms",

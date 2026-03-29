@@ -97,7 +97,6 @@ class TextPolisher:
         self._logger = logger
         self._config = replace(config)
         self._runtime_ollama_model: str | None = None
-        self._model_probe_done = False
 
     def configure(self, config: AgentConfig) -> None:
         current_key = (
@@ -111,7 +110,6 @@ class TextPolisher:
         self._config = replace(config)
         if current_key != next_key:
             self._runtime_ollama_model = None
-            self._model_probe_done = False
 
     async def polish(self, text: str) -> PolishResult:
         raw_text = text or ""
@@ -224,8 +222,6 @@ class TextPolisher:
             return configured_model
         if self._runtime_ollama_model:
             return self._runtime_ollama_model
-        if self._model_probe_done:
-            return None
 
         response = self._get_json(
             f"{config.ollama_base_url}/api/tags",
@@ -239,11 +235,9 @@ class TextPolisher:
             if not model_name:
                 raise OllamaInvalidResponseError("missing model name")
             self._runtime_ollama_model = model_name
-            self._model_probe_done = True
             self._logger.info("text_polisher_runtime_model_detected model=%s", model_name)
             return model_name
 
-        self._model_probe_done = True
         return None
 
     def _render_prompt(self, text: str, template: str) -> str:
