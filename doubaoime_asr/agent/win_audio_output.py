@@ -77,18 +77,13 @@ class SystemOutputMuteGuard:
 
     def activate(self) -> bool:
         with self._lock:
-            policy = self._policy
-            state = self._state
+            if self._policy != CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT or sys.platform != "win32":
+                return False
+            if self._state is not None:
+                return True
 
-        if policy != CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT or sys.platform != "win32":
-            return False
-        if state is not None:
-            return True
-
-        endpoint_state = _set_default_output_muted(True)
-        with self._lock:
-            if self._state is None:
-                self._state = endpoint_state
+            endpoint_state = _set_default_output_muted(True)
+            self._state = endpoint_state
         self._logger.info(
             "capture_output_muted endpoint_id=%s previous_muted=%s",
             endpoint_state.endpoint_id,
@@ -99,13 +94,11 @@ class SystemOutputMuteGuard:
     def release(self) -> bool:
         with self._lock:
             state = self._state
-
-        if state is None:
-            return False
-
-        _restore_output_mute_state(state)
-        with self._lock:
-            if self._state == state:
+            if state is None:
+                return False
+            try:
+                _restore_output_mute_state(state)
+            finally:
                 self._state = None
         self._logger.info(
             "capture_output_restored endpoint_id=%s restored_muted=%s",
