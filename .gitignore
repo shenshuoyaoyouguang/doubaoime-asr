@@ -2,6 +2,7 @@
 __pycache__/
 *.py[oc]
 build/
+build_validate/
 dist/
 wheels/
 *.egg-info
