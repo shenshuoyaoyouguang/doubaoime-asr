@@ -7,12 +7,15 @@ from typing import Callable, Mapping
 
 from .config import (
     AgentConfig,
+    CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT,
+    CAPTURE_OUTPUT_POLICY_OFF,
     DEFAULT_OLLAMA_BASE_URL,
     INJECTION_POLICY_DIRECT_ONLY,
     INJECTION_POLICY_DIRECT_THEN_CLIPBOARD,
     POLISH_MODE_LIGHT,
     POLISH_MODE_OFF,
     POLISH_MODE_OLLAMA,
+    SUPPORTED_CAPTURE_OUTPUT_POLICIES,
     SUPPORTED_INJECTION_POLICIES,
     SUPPORTED_MODES,
     SUPPORTED_POLISH_MODES,
@@ -29,6 +32,11 @@ MODE_OPTIONS: list[tuple[str, str]] = [
 INJECTION_POLICY_OPTIONS: list[tuple[str, str]] = [
     (INJECTION_POLICY_DIRECT_THEN_CLIPBOARD, "智能兼容（默认，失败时用剪贴板）"),
     (INJECTION_POLICY_DIRECT_ONLY, "仅直接输入（绝不动剪贴板）"),
+]
+
+CAPTURE_OUTPUT_OPTIONS: list[tuple[str, str]] = [
+    (CAPTURE_OUTPUT_POLICY_OFF, "保持现状"),
+    (CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT, "录音时静音系统输出"),
 ]
 
 POLISH_MODE_OPTIONS: list[tuple[str, str]] = [
@@ -102,6 +110,10 @@ def build_config_from_settings_values(
     if injection_policy not in SUPPORTED_INJECTION_POLICIES:
         raise SettingsValidationError("注入策略无效")
 
+    capture_output_policy = values.get("capture_output_policy", "")
+    if capture_output_policy not in SUPPORTED_CAPTURE_OUTPUT_POLICIES:
+        raise SettingsValidationError("系统输出处理无效")
+
     polish_mode = values.get("polish_mode", "")
     if polish_mode not in SUPPORTED_POLISH_MODES:
         raise SettingsValidationError("润色模式无效")
@@ -114,6 +126,7 @@ def build_config_from_settings_values(
         mode=mode,
         microphone_device=_parse_microphone_value(values.get("microphone_device", "__default__")),
         injection_policy=injection_policy,
+        capture_output_policy=capture_output_policy,
         render_debounce_ms=_parse_int(values.get("render_debounce_ms", ""), "流式防抖", 0, 1000),
         polish_mode=polish_mode,
         ollama_base_url=_parse_optional_text(
@@ -386,6 +399,7 @@ class SettingsWindowController:
             ("microphone_device", "麦克风", "combo"),
             ("render_debounce_ms", "流式防抖(ms)", "edit"),
             ("injection_policy", "注入策略", "combo"),
+            ("capture_output_policy", "系统输出处理", "combo"),
             ("polish_mode", "最终润色", "combo"),
             ("ollama_base_url", "Ollama 地址", "edit"),
             ("ollama_model", "Ollama 模型", "edit"),
@@ -510,6 +524,7 @@ class SettingsWindowController:
         self._set_combo_items("mode", MODE_OPTIONS, config.mode)
         self._set_combo_items("microphone_device", list_microphone_choices(config.microphone_device), _microphone_choice_value(config.microphone_device))
         self._set_combo_items("injection_policy", INJECTION_POLICY_OPTIONS, config.injection_policy)
+        self._set_combo_items("capture_output_policy", CAPTURE_OUTPUT_OPTIONS, config.capture_output_policy)
         self._set_combo_items("polish_mode", POLISH_MODE_OPTIONS, config.polish_mode)
         self._set_combo_items(
             "ollama_warmup_enabled",
@@ -579,7 +594,14 @@ class SettingsWindowController:
             "overlay_animation_ms": win32gui.GetWindowText(self._controls["overlay_animation_ms"]),
         }
 
-        for name in ("mode", "microphone_device", "injection_policy", "polish_mode", "ollama_warmup_enabled"):
+        for name in (
+            "mode",
+            "microphone_device",
+            "injection_policy",
+            "capture_output_policy",
+            "polish_mode",
+            "ollama_warmup_enabled",
+        ):
             combo_handle = self._controls[name]
             index = int(win32gui.SendMessage(combo_handle, win32con.CB_GETCURSEL, 0, 0))
             values[name] = self._combo_values[name][index] if index >= 0 else ""

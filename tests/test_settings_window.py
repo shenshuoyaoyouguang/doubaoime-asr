@@ -2,6 +2,7 @@ import pytest
 
 from doubaoime_asr.agent.config import (
     AgentConfig,
+    CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT,
     INJECTION_POLICY_DIRECT_THEN_CLIPBOARD,
     POLISH_MODE_OLLAMA,
 )
@@ -22,6 +23,7 @@ def test_build_config_from_settings_values_updates_runtime_fields():
             "mode": "recognize",
             "microphone_device": "index:3",
             "injection_policy": INJECTION_POLICY_DIRECT_THEN_CLIPBOARD,
+            "capture_output_policy": CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT,
             "render_debounce_ms": "40",
             "polish_mode": POLISH_MODE_OLLAMA,
             "ollama_base_url": "http://127.0.0.1:11434/",
@@ -43,6 +45,7 @@ def test_build_config_from_settings_values_updates_runtime_fields():
     assert updated.mode == "recognize"
     assert updated.microphone_device == 3
     assert updated.injection_policy == INJECTION_POLICY_DIRECT_THEN_CLIPBOARD
+    assert updated.capture_output_policy == CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT
     assert updated.polish_mode == POLISH_MODE_OLLAMA
     assert updated.ollama_base_url == "http://127.0.0.1:11434"
     assert updated.ollama_model == "qwen2.5:3b"
@@ -61,6 +64,34 @@ def test_build_config_from_settings_values_rejects_invalid_hotkey():
                 "mode": "inject",
                 "microphone_device": "__default__",
                 "injection_policy": "direct_only",
+                "capture_output_policy": "off",
+                "render_debounce_ms": "80",
+                "polish_mode": "off",
+                "ollama_base_url": "http://localhost:11434",
+                "ollama_model": "",
+                "polish_timeout_ms": "800",
+                "ollama_warmup_enabled": "true",
+                "overlay_render_fps": "30",
+                "overlay_font_size": "14",
+                "overlay_max_width": "620",
+                "overlay_opacity_percent": "92",
+                "overlay_bottom_offset": "120",
+                "overlay_animation_ms": "150",
+            },
+        )
+
+
+def test_build_config_from_settings_values_rejects_invalid_capture_output_policy():
+    with pytest.raises(SettingsValidationError):
+        build_config_from_settings_values(
+            AgentConfig(),
+            {
+                "hotkey_vk": "119",
+                "hotkey_display": "F8",
+                "mode": "inject",
+                "microphone_device": "__default__",
+                "injection_policy": "direct_only",
+                "capture_output_policy": "invalid",
                 "render_debounce_ms": "80",
                 "polish_mode": "off",
                 "ollama_base_url": "http://localhost:11434",
