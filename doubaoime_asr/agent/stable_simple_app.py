@@ -32,9 +32,11 @@ from .text_polisher import PolishResult, TextPolisher
 from .win_audio_output import AudioOutputMuteError, SystemOutputMuteGuard
 from .win_keyboard_hook import GlobalHotkeyHook
 from .win_hotkey import normalize_hotkey, vk_from_hotkey, vk_to_display, vk_to_hotkey
+from .win_privileges import is_current_process_elevated, restart_as_admin
 
 
 Mode = Literal["recognize", "inject"]
+FOREGROUND_POLL_INTERVAL_S = 0.5
 
 
 @dataclass(slots=True)
@@ -96,12 +98,14 @@ class StableVoiceInputApp:
         mode: Mode | None = None,
         enable_tray: bool = True,
         console: bool = False,
+        launch_args: list[str] | None = None,
     ) -> None:
         self.config = config
         self.mode = mode or config.mode
         self.config.mode = self.mode
         self.enable_tray = enable_tray
         self.console = console
+        self.launch_args = list(launch_args or [])
 
         self.logger = setup_named_logger(
             "doubaoime_asr.agent.controller",
@@ -135,6 +139,10 @@ class StableVoiceInputApp:
         self._pending_polisher_warmup = False
         self._next_worker_session_id = 0
         self._polisher_warmup_task: asyncio.Task[None] | None = None
+        self._foreground_watch_task: asyncio.Task[None] | None = None
+        self._process_elevated = is_current_process_elevated() is True
+        self._elevation_warning_message: str | None = None
+        self._last_elevation_warning_key: tuple[int | None, int | None, str | None] | None = None
 
     def set_status(self, value: str) -> None:
         with self._status_lock:
@@ -183,6 +191,8 @@ class StableVoiceInputApp:
         self._loop = loop
         self._listener = self._build_listener(loop, self.config.effective_hotkey_vk())
         self._listener.start()
+        if not self._process_elevated:
+            self._foreground_watch_task = asyncio.create_task(self._watch_foreground_target(), name="doubao-foreground-watch")
         self._schedule_polisher_warmup("startup")
         self._settings_controller = SettingsWindowController(
             logger=self.logger,
@@ -216,6 +226,8 @@ class StableVoiceInputApp:
                     elif kind == "apply_config":
                         if isinstance(payload, AgentConfig):
                             await self._apply_config(payload)
+                    elif kind == "restart_as_admin":
+                        await self._handle_restart_as_admin()
                     elif kind == "stop":
                         break
                 except Exception:
@@ -225,6 +237,7 @@ class StableVoiceInputApp:
         except KeyboardInterrupt:
             self.stop()
         finally:
+            await self._cancel_foreground_watch()
             await self._cancel_polisher_warmup()
             await self._terminate_worker()
             if self._listener is not None:
@@ -256,7 +269,18 @@ class StableVoiceInputApp:
             if target is None:
                 self.set_status("未检测到可写入焦点")
                 return
-            self.logger.info("captured_target hwnd=%s focus_hwnd=%s", target.hwnd, target.focus_hwnd)
+            if self._target_requires_admin(target):
+                self._record_elevation_warning(target, log_tag="press_blocked_elevated_target")
+                return
+            self._clear_elevation_warning()
+            self.logger.info(
+                "captured_target hwnd=%s focus_hwnd=%s process=%s terminal=%s elevated=%s",
+                target.hwnd,
+                target.focus_hwnd,
+                target.process_name,
+                target.terminal_kind,
+                target.is_elevated,
+            )
             if self._should_enable_inline_streaming(target):
                 composition = CompositionSession(self.injection_manager.injector, target)
                 inline_streaming_enabled = True
@@ -277,7 +301,8 @@ class StableVoiceInputApp:
             self.set_status(restore_warning or "启动识别失败，请查看 controller.log")
             await self._restart_worker()
             return
-        await self.overlay_scheduler.hide("session_start")
+        # 显示麦克风界面（而非隐藏 overlay）
+        await self.overlay_scheduler.show_microphone()
         self.set_status(capture_output_warning or "启动识别中…")
 
     async def _handle_release(self) -> None:
@@ -499,6 +524,9 @@ class StableVoiceInputApp:
                 )
                 if not blocked:
                     await self._inject_final(text)
+            return
+        if self._target_requires_admin(self._session.target):
+            self._record_elevation_warning(self._session.target, log_tag="inject_blocked_elevated_target")
             return
         try:
             result = await self.injection_manager.inject_text(self._session.target, text)
@@ -736,6 +764,95 @@ class StableVoiceInputApp:
             await self._polisher_warmup_task
         self._polisher_warmup_task = None
 
+    async def _watch_foreground_target(self) -> None:
+        try:
+            while not self._stopping:
+                self._check_foreground_elevation()
+                await asyncio.sleep(FOREGROUND_POLL_INTERVAL_S)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.logger.exception("foreground_watch_failed")
+
+    async def _cancel_foreground_watch(self) -> None:
+        if self._foreground_watch_task is None or self._foreground_watch_task.done():
+            self._foreground_watch_task = None
+            return
+        self._foreground_watch_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._foreground_watch_task
+        self._foreground_watch_task = None
+
+    def _check_foreground_elevation(self) -> None:
+        if self._process_elevated:
+            return
+        if self._session is not None and self._session.active:
+            return
+        try:
+            target = self.injection_manager.capture_target()
+        except Exception:
+            self.logger.exception("foreground_target_capture_failed")
+            return
+        if self._target_requires_admin(target):
+            self._record_elevation_warning(target, log_tag="foreground_elevated_target_detected")
+            return
+        self._clear_elevation_warning()
+
+    def _target_requires_admin(self, target: FocusTarget | None) -> bool:
+        return target is not None and target.is_elevated is True and not self._process_elevated
+
+    def _elevation_status_message(self, target: FocusTarget) -> str:
+        subject = "管理员终端" if target.is_terminal else "管理员窗口"
+        if self.enable_tray:
+            return f"{subject}需要以管理员身份运行代理；请从托盘选择“以管理员重启”"
+        return f"{subject}需要以管理员身份运行代理；请重新以管理员身份启动代理"
+
+    def _record_elevation_warning(self, target: FocusTarget, *, log_tag: str) -> None:
+        message = self._elevation_status_message(target)
+        key = (target.hwnd, target.process_id, target.process_name)
+        if key != self._last_elevation_warning_key:
+            self.logger.warning(
+                "%s hwnd=%s pid=%s process=%s terminal=%s elevated=%s",
+                log_tag,
+                target.hwnd,
+                target.process_id,
+                target.process_name,
+                target.terminal_kind,
+                target.is_elevated,
+            )
+            self._last_elevation_warning_key = key
+        self._elevation_warning_message = message
+        self.set_status(message)
+
+    def _clear_elevation_warning(self) -> None:
+        message = self._elevation_warning_message
+        self._elevation_warning_message = None
+        self._last_elevation_warning_key = None
+        if message and self._status == message and (self._session is None or not self._session.active):
+            self.set_status("空闲")
+
+    async def _handle_restart_as_admin(self) -> None:
+        if self._process_elevated:
+            self.set_status("代理已在管理员模式运行")
+            return
+        try:
+            restarted = restart_as_admin(
+                self.launch_args,
+                executable=sys.executable,
+                frozen=bool(getattr(sys, "frozen", False)),
+            )
+        except Exception:
+            self.logger.exception("restart_as_admin_failed")
+            self.set_status("管理员重启失败，请查看 controller.log")
+            return
+        if not restarted:
+            self.logger.warning("restart_as_admin_declined")
+            self.set_status("管理员重启已取消或被系统拒绝")
+            return
+        self.logger.info("restart_as_admin_requested args=%s", self.launch_args)
+        self.set_status("正在以管理员身份重启…")
+        self.stop()
+
     def stop(self) -> None:
         self._stopping = True
         with contextlib.suppress(Exception):
@@ -904,6 +1021,9 @@ class StableVoiceInputApp:
         def stop_app(icon=None, item=None):
             loop.call_soon_threadsafe(self.stop)
 
+        def restart_app_as_admin(icon=None, item=None):
+            self._emit_threadsafe(loop, "restart_as_admin")
+
         icon = pystray.Icon(
             "doubao-voice-agent",
             build_icon(),
@@ -913,6 +1033,7 @@ class StableVoiceInputApp:
                 pystray.MenuItem(lambda item: f"模式: {self.mode}", None, enabled=False),
                 pystray.MenuItem(lambda item: f"热键: {self.config.effective_hotkey_display()}", None, enabled=False),
                 pystray.Menu.SEPARATOR,
+                pystray.MenuItem("以管理员重启", restart_app_as_admin, enabled=lambda item: not self._process_elevated),
                 pystray.MenuItem("设置", open_settings),
                 pystray.MenuItem("打开日志目录", open_log_dir),
                 pystray.MenuItem("退出", stop_app),

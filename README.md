@@ -185,7 +185,7 @@ doubao-voice-agent --injection-policy direct_then_clipboard
 doubao-voice-agent --no-tray --console
 ```
 
-托盘菜单现在提供 **“设置”** 入口，可以直接修改热键、注入策略、麦克风和悬浮窗样式；保存后会尽量即时生效。热键支持**录制单键（含 Right Ctrl）**。默认注入策略是 `direct_then_clipboard`：先尝试直接输入，只有直接输入失败时才会使用剪贴板回退。如果你明确不希望任何情况下触碰剪贴板，可以改成 `direct_only`。终端（Windows Terminal / cmd / PowerShell）会自动使用终端专用注入策略。
+托盘菜单现在提供 **“设置”** 入口，可以直接修改热键、注入策略、麦克风和悬浮窗样式；保存后会尽量即时生效。热键支持**录制单键（含 Right Ctrl）**。默认注入策略是 `direct_then_clipboard`：先尝试直接输入，只有直接输入失败时才会使用剪贴板回退。如果你明确不希望任何情况下触碰剪贴板，可以改成 `direct_only`。终端（Windows Terminal / cmd / PowerShell）会自动使用终端专用注入策略；如果前台是**管理员终端/管理员窗口**，请从托盘选择 **“以管理员重启”**。
 
 ### 打包为可分发程序
 
@@ -204,7 +204,7 @@ doubao-voice-agent --no-tray --console
 ### 已知限制
 
 - 当前实现是“桌面代理”，不是原生 Windows IME / TSF 输入法
-- 流式上屏基于键盘注入，适用于大部分普通文本输入框，但不保证所有自绘控件、管理员权限窗口、游戏窗口都兼容
+- 流式上屏基于键盘注入，适用于大部分普通文本输入框；普通终端会走专用粘贴策略，但管理员权限窗口/管理员终端需要代理本身也以管理员身份运行
 - 当前默认就是全局注入模式；如果需要排障，优先切到 `--mode recognize --console`
 
 ### 排障建议
@@ -213,7 +213,8 @@ doubao-voice-agent --no-tray --console
 
 1. 先用 `python examples/mic_realtime.py` 确认 ASR 本身可用
 2. 再用 `doubao-voice-agent --mode recognize --console` 观察控制台状态输出
-3. 查看 `%APPDATA%/DoubaoVoiceInput/logs/controller.log`
+3. 如果前台是管理员终端或管理员窗口，先从托盘执行 **“以管理员重启”**
+4. 查看 `%APPDATA%/DoubaoVoiceInput/logs/controller.log`
 4. 如果 Controller 已触发热键，再看 `%APPDATA%/DoubaoVoiceInput/logs/workers/` 下最新的 worker 日志
 
 ## API 参考

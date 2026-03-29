@@ -6,6 +6,8 @@ from ctypes import wintypes
 from pathlib import Path
 from typing import Iterable
 
+from .win_privileges import get_process_elevation
+
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -107,6 +109,7 @@ class FocusTarget:
     focus_class: str | None = None
     is_terminal: bool = False
     terminal_kind: str | None = None
+    is_elevated: bool | None = None
 
 
 class GUITHREADINFO(ctypes.Structure):
@@ -278,6 +281,7 @@ class WindowsTextInjector:
         focus_hwnd = get_focus_hwnd(hwnd)
         process_id = get_window_process_id(hwnd)
         process_name = get_process_name(process_id)
+        is_elevated = get_process_elevation(process_id)
         window_class = get_window_class_name(hwnd)
         focus_class = get_window_class_name(focus_hwnd or 0)
         is_terminal, terminal_kind = classify_focus_target(process_name, window_class, focus_class)
@@ -290,6 +294,7 @@ class WindowsTextInjector:
             focus_class=focus_class,
             is_terminal=is_terminal,
             terminal_kind=terminal_kind,
+            is_elevated=is_elevated,
         )
 
     def ensure_target(self, target: FocusTarget) -> None:

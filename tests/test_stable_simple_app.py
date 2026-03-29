@@ -41,9 +41,21 @@ class _DummyInjectionManager:
         self.logger = logger
         self.policy = policy
         self.injector = _DummyInjector()
+        self.captured_target: stable_simple_app.FocusTarget | None = None
 
     def set_policy(self, policy: str) -> None:
         self.policy = policy
+
+    def capture_target(self):
+        return self.captured_target
+
+    async def inject_text(self, target, text: str):
+        return SimpleNamespace(
+            method="direct",
+            target_profile="editor",
+            clipboard_touched=False,
+            restored_clipboard=False,
+        )
 
 
 class _DummyPreview:
@@ -73,6 +85,9 @@ class _DummyScheduler:
 
     async def submit_final(self, text: str, *, kind: str) -> None:
         self.calls.append(("final", (text, kind)))
+
+    async def show_microphone(self) -> None:
+        self.calls.append(("microphone", ()))
 
     async def hide(self, reason: str) -> None:
         self.calls.append(("hide", (reason,)))
@@ -142,6 +157,7 @@ def _build_app(monkeypatch: pytest.MonkeyPatch, config: AgentConfig | None = Non
     monkeypatch.setattr(stable_simple_app, "OverlayRenderScheduler", _DummyScheduler)
     monkeypatch.setattr(stable_simple_app, "TextPolisher", _DummyPolisher)
     monkeypatch.setattr(stable_simple_app, "SystemOutputMuteGuard", _DummyCaptureOutputGuard)
+    monkeypatch.setattr(stable_simple_app, "is_current_process_elevated", lambda: False)
     return stable_simple_app.StableVoiceInputApp(config or AgentConfig(), enable_tray=False)
 
 
@@ -534,3 +550,87 @@ def test_handle_worker_exit_releases_capture_output(monkeypatch: pytest.MonkeyPa
     asyncio.run(app._handle_worker_exit(8, 1))
 
     assert app.capture_output_guard.release_calls == 1
+
+
+def test_handle_press_blocks_admin_target_before_start(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="inject")
+    app = _build_app(monkeypatch, config)
+    session = _build_session(13)
+    app.injection_manager.captured_target = stable_simple_app.FocusTarget(
+        hwnd=100,
+        process_id=200,
+        process_name="WindowsTerminal.exe",
+        is_terminal=True,
+        terminal_kind="windows_terminal",
+        is_elevated=True,
+    )
+
+    async def fake_ensure_worker() -> stable_simple_app.WorkerSession:
+        return session
+
+    send_calls: list[str] = []
+
+    async def fake_send_worker_command(command: str) -> None:
+        send_calls.append(command)
+
+    monkeypatch.setattr(app, "_ensure_worker", fake_ensure_worker)
+    monkeypatch.setattr(app, "_send_worker_command", fake_send_worker_command)
+
+    asyncio.run(app._handle_press())
+
+    assert send_calls == []
+    assert app._status == "管理员终端需要以管理员身份运行代理；请重新以管理员身份启动代理"
+
+
+def test_check_foreground_elevation_warns_and_clears(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch, AgentConfig(mode="inject"))
+    app.injection_manager.captured_target = stable_simple_app.FocusTarget(
+        hwnd=10,
+        process_id=20,
+        process_name="WindowsTerminal.exe",
+        is_terminal=True,
+        terminal_kind="windows_terminal",
+        is_elevated=True,
+    )
+
+    app._check_foreground_elevation()
+    assert app._status == "管理员终端需要以管理员身份运行代理；请重新以管理员身份启动代理"
+
+    app.injection_manager.captured_target = stable_simple_app.FocusTarget(
+        hwnd=11,
+        process_id=21,
+        process_name="notepad.exe",
+        is_terminal=False,
+        is_elevated=False,
+    )
+    app._check_foreground_elevation()
+
+    assert app._status == "空闲"
+
+
+def test_handle_restart_as_admin_stops_after_success(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    app.launch_args = ["--console"]
+    restart_calls: list[tuple[tuple[str, ...], str, bool]] = []
+
+    def fake_restart_as_admin(args, *, executable, frozen):
+        restart_calls.append((tuple(args), executable, frozen))
+        return True
+
+    monkeypatch.setattr(stable_simple_app, "restart_as_admin", fake_restart_as_admin)
+
+    asyncio.run(app._handle_restart_as_admin())
+
+    assert restart_calls == [(("--console",), sys.executable, False)]
+    assert app._stopping is True
+    assert app._status == "正在以管理员身份重启…"
+
+
+def test_handle_restart_as_admin_reports_declined(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    monkeypatch.setattr(stable_simple_app, "restart_as_admin", lambda *args, **kwargs: False)
+
+    asyncio.run(app._handle_restart_as_admin())
+
+    assert app._stopping is False
+    assert app._status == "管理员重启已取消或被系统拒绝"

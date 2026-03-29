@@ -57,13 +57,33 @@ def test_terminal_injection_uses_terminal_profile(monkeypatch):
     )
 
     monkeypatch.setattr(manager.injector, "ensure_target", lambda target: None)
-    monkeypatch.setattr(manager.injector, "type_text", lambda target, text: (_ for _ in ()).throw(RuntimeError("direct failed")))
+    monkeypatch.setattr(manager.injector, "type_text", lambda target, text: pytest.fail("terminal should not use direct typing"))
     monkeypatch.setattr(manager, "_send_ctrl_shift_v_paste", lambda target, text: asyncio.sleep(0, result=True))
 
     result = asyncio.run(manager.inject_text(terminal_target, "hello"))
 
     assert result.method == "terminal_ctrl_shift_v"
     assert result.target_profile == "terminal"
+
+
+def test_terminal_injection_direct_only_rejects_clipboardless_terminal(monkeypatch):
+    manager = TextInjectionManager(
+        logging.getLogger("inject-test"),
+        policy=INJECTION_POLICY_DIRECT_ONLY,
+    )
+    terminal_target = FocusTarget(
+        hwnd=1,
+        process_name="WindowsTerminal.exe",
+        window_class="CASCADIA_HOSTING_WINDOW_CLASS",
+        is_terminal=True,
+        terminal_kind="windows_terminal",
+    )
+
+    monkeypatch.setattr(manager.injector, "ensure_target", lambda target: None)
+    monkeypatch.setattr(manager.injector, "type_text", lambda target, text: pytest.fail("terminal should not use direct typing"))
+
+    with pytest.raises(RuntimeError, match="clipboard-compatible policy"):
+        asyncio.run(manager.inject_text(terminal_target, "hello"))
 
 
 @pytest.mark.parametrize(

@@ -53,13 +53,19 @@ class TextInjectionManager:
         self.injector.ensure_target(target)
         target_profile = "terminal" if target.is_terminal else "editor"
         self.logger.info(
-            "inject_target profile=%s process=%s window_class=%s focus_class=%s terminal_kind=%s",
+            "inject_target profile=%s process=%s window_class=%s focus_class=%s terminal_kind=%s elevated=%s",
             target_profile,
             target.process_name,
             target.window_class,
             target.focus_class,
             target.terminal_kind,
+            target.is_elevated,
         )
+
+        if target.is_terminal:
+            if self.policy != INJECTION_POLICY_DIRECT_THEN_CLIPBOARD:
+                raise RuntimeError("terminal injection requires clipboard-compatible policy")
+            return await self._inject_terminal(target, text)
 
         try:
             self.injector.type_text(target, text)
@@ -74,9 +80,6 @@ class TextInjectionManager:
 
         if self.policy != INJECTION_POLICY_DIRECT_THEN_CLIPBOARD:
             raise RuntimeError(f"unsupported injection policy: {self.policy}")
-
-        if target.is_terminal:
-            return await self._inject_terminal(target, text)
 
         first_error: Exception | None = None
         try:
