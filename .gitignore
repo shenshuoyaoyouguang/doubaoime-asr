@@ -13,6 +13,12 @@ venv_win/
 
 # Test and cache
 .pytest_cache/
+build_verify/
+dist_verify/
+
+# Local temporary files
+$null
+False
 
 # Tool state directories
 .omc/
