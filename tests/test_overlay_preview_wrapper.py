@@ -120,4 +120,4 @@ def test_overlay_preview_stops_native_backend_after_configure_failure(monkeypatc
 
     assert _ConfigureFailNative.instances[0].stop_calls == 1
     assert legacy_backend.calls[0][0] == "start"
-    assert legacy_backend.calls[2] == ("show", ("hello", 0, "interim"))
+    assert legacy_backend.calls[2] == ("show", ("hello", 0, "interim", 0))
