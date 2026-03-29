@@ -210,11 +210,10 @@ doubao-voice-agent --no-tray --console
 
 ### CI 流程
 
-`CI` 工作流会分成三段：
+`CI` 工作流现在只跑 Windows，两段完成：
 
-1. `ubuntu-latest`：运行跨平台安全测试子集
-2. `windows-latest`：运行完整 Windows pytest 测试集
-3. `windows-latest`：构建 `doubao-voice-agent` 并上传 Artifact
+1. `windows-latest`：运行完整 Windows pytest 测试集
+2. `windows-latest`：构建 `doubao-voice-agent` 并上传 Artifact
 
 当前 Actions 统一固定使用 **Python 3.12**，这是当前已验证通过的 PyInstaller 构建版本。
 
@@ -257,6 +256,7 @@ doubao-voice-agent-v0.2.1-windows-x64.zip
 ### 注意事项
 
 - 当前 workflow **只监听 `master`**，不会自动监听 `main`
+- 当前 CI / CD **只面向 Windows 版本**
 - 当前只发布 **GitHub Release 资产**，不发布 PyPI 包
 - 当前未接入代码签名；如果后续需要对外分发安装包，建议再补充签名与安装器流程
 
