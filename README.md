@@ -201,6 +201,65 @@ doubao-voice-agent --no-tray --console
 - 自动带上 `opus.dll` 及其依赖 DLL
 - 自动带上原生 `overlay_ui.exe`
 
+## GitHub Actions CI/CD
+
+仓库已预留两条 GitHub Actions 工作流：
+
+- `CI`：在 `master` 分支的 `push` / `pull_request` 上自动执行
+- `Release`：在推送 `v*` 标签时自动发布 GitHub Release
+
+### CI 流程
+
+`CI` 工作流会分成三段：
+
+1. `ubuntu-latest`：运行跨平台安全测试子集
+2. `windows-latest`：运行完整 Windows pytest 测试集
+3. `windows-latest`：构建 `doubao-voice-agent` 并上传 Artifact
+
+当前 Actions 统一固定使用 **Python 3.12**，这是当前已验证通过的 PyInstaller 构建版本。
+
+构建成功后，Actions 页面会产出一个 Artifact：
+
+```text
+doubao-voice-agent-windows-x64-<commit-sha>
+```
+
+Artifact 内容是一个 zip 包，内部包含：
+
+- `doubao-voice-agent.exe`
+- `_internal/overlay_ui.exe`
+- `_internal/opus.dll`
+- `_internal/libgcc_s_seh-1.dll`
+- `_internal/libwinpthread-1.dll`
+
+### Release 流程
+
+当你推送类似下面的版本标签时：
+
+```bash
+git checkout master
+git pull
+git tag v0.2.1
+git push origin master --tags
+```
+
+`Release` 工作流会：
+
+- 校验该标签指向的提交是否属于 `origin/master`
+- 重新执行 Windows 打包
+- 自动创建或更新 GitHub Release
+- 上传发布资产：
+
+```text
+doubao-voice-agent-v0.2.1-windows-x64.zip
+```
+
+### 注意事项
+
+- 当前 workflow **只监听 `master`**，不会自动监听 `main`
+- 当前只发布 **GitHub Release 资产**，不发布 PyPI 包
+- 当前未接入代码签名；如果后续需要对外分发安装包，建议再补充签名与安装器流程
+
 ### 已知限制
 
 - 当前实现是“桌面代理”，不是原生 Windows IME / TSF 输入法
