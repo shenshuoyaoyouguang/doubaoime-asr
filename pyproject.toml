@@ -1,10 +1,11 @@
 [project]
 name = "doubaoime-asr"
-version = "0.2.1"
+version = "0.2.2"
 description = "豆包输入法 ASR"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "cryptography>=46.0.0",
     "miniaudio>=1.61",
     "opuslib>=3.0.1",
     "protobuf>=6.33.5",
