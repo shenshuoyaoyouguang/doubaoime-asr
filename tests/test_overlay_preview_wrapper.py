@@ -23,8 +23,8 @@ class _LegacyBackend:
     def configure(self, config) -> None:
         self.calls.append(("configure", (config,)))
 
-    def show(self, text: str, *, seq: int = 0, kind: str = "interim") -> None:
-        self.calls.append(("show", (text, seq, kind)))
+    def show(self, text: str, *, seq: int = 0, kind: str = "interim", stable_prefix_utf16_len: int = 0) -> None:
+        self.calls.append(("show", (text, seq, kind, stable_prefix_utf16_len)))
 
     def hide(self, reason: str = "") -> None:
         self.calls.append(("hide", (reason,)))
@@ -44,7 +44,7 @@ def test_overlay_preview_falls_back_to_tk(monkeypatch):
 
     assert legacy_backend.calls[0][0] == "start"
     assert legacy_backend.calls[1][0] == "configure"
-    assert legacy_backend.calls[2] == ("show", ("hello", 0, "interim"))
+    assert legacy_backend.calls[2] == ("show", ("hello", 0, "interim", 0))
 
 
 class _BrokenNativeCall:
@@ -57,7 +57,7 @@ class _BrokenNativeCall:
     def configure(self, config) -> None:
         return None
 
-    def show(self, text: str, *, seq: int = 0, kind: str = "interim") -> None:
+    def show(self, text: str, *, seq: int = 0, kind: str = "interim", stable_prefix_utf16_len: int = 0) -> None:
         raise RuntimeError("native show failed")
 
     def stop(self) -> None:
@@ -89,7 +89,7 @@ class _BrokenLegacyBackend:
     def configure(self, config) -> None:
         return None
 
-    def show(self, text: str, *, seq: int = 0, kind: str = "interim") -> None:
+    def show(self, text: str, *, seq: int = 0, kind: str = "interim", stable_prefix_utf16_len: int = 0) -> None:
         return None
 
     def stop(self) -> None:
@@ -120,4 +120,4 @@ def test_overlay_preview_stops_native_backend_after_configure_failure(monkeypatc
 
     assert _ConfigureFailNative.instances[0].stop_calls == 1
     assert legacy_backend.calls[0][0] == "start"
-    assert legacy_backend.calls[2] == ("show", ("hello", 0, "interim"))
+    assert legacy_backend.calls[2] == ("show", ("hello", 0, "interim", 0))

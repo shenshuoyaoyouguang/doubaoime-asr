@@ -124,15 +124,21 @@ void OverlayWindow::ShowText(OverlayShowPayload payload) {
     }
     last_seq_ = payload.seq;
     const bool text_changed = text_ != payload.text;
+    const bool kind_changed = kind_ != payload.kind;
     text_ = std::move(payload.text);
+    kind_ = std::move(payload.kind);
+    stable_prefix_utf16_len_ = std::min<unsigned long long>(payload.stable_prefix_utf16_len, text_.size());
     if (text_.empty()) {
         Hide();
         return;
     }
 
-    if (text_changed || text_layout_ == nullptr) {
+    if (text_changed || kind_changed || text_layout_ == nullptr) {
         RebuildLayout();
+    } else if (prefix_layout_ == nullptr && stable_prefix_utf16_len_ > 0 && stable_prefix_utf16_len_ < text_.size()) {
+        RebuildPrefixLayout();
     }
+    tail_animation_started_at_ = std::chrono::steady_clock::now();
 
     if (!window_visible_) {
         ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
@@ -147,6 +153,9 @@ void OverlayWindow::ShowText(OverlayShowPayload payload) {
 
     target_opacity_ = 1.0F;
     visibility_state_ = VisibilityState::Visible;
+    if (ShouldAnimateTail()) {
+        SetTimer(hwnd_, kAnimationTimerId, 16, nullptr);
+    }
     Render();
 }
 
@@ -176,6 +185,8 @@ void OverlayWindow::Configure(OverlayStyle style) {
     }
 
     text_format_.Reset();
+    prefix_layout_.Reset();
+    session_peak_width_px_ = 0;
     if (!text_.empty()) {
         RebuildLayout();
         Render();
@@ -482,7 +493,35 @@ void OverlayWindow::RebuildLayout() {
         return;
     }
 
+    RebuildPrefixLayout();
     UpdateGeometry();
+}
+
+void OverlayWindow::RebuildPrefixLayout() {
+    prefix_layout_.Reset();
+    if (stable_prefix_utf16_len_ == 0 || stable_prefix_utf16_len_ >= text_.size()) {
+        return;
+    }
+    if (!EnsureTextFormat()) {
+        return;
+    }
+
+    const float scale = DpiScale();
+    const float max_width = style_.max_width * scale;
+    const float max_height = kMaxTextHeightDip * scale;
+    const std::wstring prefix_text = text_.substr(0, static_cast<std::size_t>(stable_prefix_utf16_len_));
+
+    HRESULT hr = dwrite_factory_->CreateTextLayout(
+        prefix_text.c_str(),
+        static_cast<UINT32>(prefix_text.size()),
+        text_format_.Get(),
+        max_width,
+        max_height,
+        prefix_layout_.ReleaseAndGetAddressOf()
+    );
+    if (FAILED(hr)) {
+        Log("create prefix layout failed hr=" + HrToString(hr));
+    }
 }
 
 void OverlayWindow::UpdateGeometry() {
@@ -504,10 +543,14 @@ void OverlayWindow::UpdateGeometry() {
     const float padding_y = kPaddingYDip * scale;
     const int min_width = static_cast<int>(std::ceil(kMinWidthDip * scale));
 
-    width_px_ = std::max(
+    const int natural_width_px = std::max(
         min_width,
         static_cast<int>(std::ceil(metrics.widthIncludingTrailingWhitespace + padding_x * 2.0F))
     );
+    const int max_width_px = static_cast<int>(std::ceil(style_.max_width * scale + padding_x * 2.0F));
+    const int clamped_width_px = std::min(max_width_px, natural_width_px);
+    session_peak_width_px_ = std::max(session_peak_width_px_, clamped_width_px);
+    width_px_ = session_peak_width_px_;
     height_px_ = static_cast<int>(std::ceil(metrics.height + padding_y * 2.0F));
 
     MONITORINFO monitor_info{};
@@ -542,9 +585,48 @@ void OverlayWindow::Render() {
         dc_render_target_->SetTransform(D2D1::Matrix3x2F::Identity());
         dc_render_target_->Clear(D2D1::ColorF(0.0F, 0.0F, 0.0F, 0.0F));
 
-        background_brush_->SetOpacity(style_.opacity * current_opacity_);
-        border_brush_->SetOpacity(0.22F * current_opacity_);
-        shadow_brush_->SetOpacity(0.18F * current_opacity_);
+        const bool is_interim = kind_ == L"interim";
+        const bool is_polishing = kind_ == L"polishing";
+        const bool is_final_committed = kind_ == L"final_committed";
+        const bool is_final_raw = kind_ == L"final_raw";
+
+        D2D1_COLOR_F background_color = D2D1::ColorF(0.07F, 0.07F, 0.07F);
+        D2D1_COLOR_F border_color = D2D1::ColorF(0.88F, 0.92F, 1.0F);
+        D2D1_COLOR_F text_color = D2D1::ColorF(1.0F, 1.0F, 1.0F);
+        float background_opacity = style_.opacity * current_opacity_;
+        float border_opacity = 0.20F * current_opacity_;
+        float shadow_opacity = 0.18F * current_opacity_;
+        float accent_opacity = 0.0F;
+
+        if (is_interim) {
+            border_color = D2D1::ColorF(0.57F, 0.77F, 1.0F);
+            border_opacity = 0.28F * current_opacity_;
+            accent_opacity = 0.24F * current_opacity_;
+        } else if (is_polishing) {
+            background_color = D2D1::ColorF(0.11F, 0.09F, 0.06F);
+            border_color = D2D1::ColorF(0.98F, 0.79F, 0.32F);
+            text_color = D2D1::ColorF(1.0F, 0.98F, 0.93F);
+            background_opacity = std::min(1.0F, style_.opacity * 0.98F) * current_opacity_;
+            border_opacity = 0.34F * current_opacity_;
+            shadow_opacity = 0.22F * current_opacity_;
+            accent_opacity = 0.40F * current_opacity_;
+        } else if (is_final_committed) {
+            background_color = D2D1::ColorF(0.06F, 0.09F, 0.12F);
+            border_color = D2D1::ColorF(0.36F, 0.74F, 1.0F);
+            border_opacity = 0.38F * current_opacity_;
+            accent_opacity = 0.46F * current_opacity_;
+        } else if (is_final_raw) {
+            border_color = D2D1::ColorF(0.90F, 0.94F, 1.0F);
+            border_opacity = 0.26F * current_opacity_;
+            accent_opacity = 0.20F * current_opacity_;
+        }
+
+        background_brush_->SetColor(background_color);
+        background_brush_->SetOpacity(background_opacity);
+        border_brush_->SetColor(border_color);
+        border_brush_->SetOpacity(border_opacity);
+        shadow_brush_->SetOpacity(shadow_opacity);
+        text_brush_->SetColor(text_color);
         text_brush_->SetOpacity(current_opacity_);
 
         const float scale = DpiScale();
@@ -552,6 +634,7 @@ void OverlayWindow::Render() {
         const float border_width = kBorderWidthDip * scale;
         const float shadow_offset_y = kShadowOffsetYDip * scale;
         const float shadow_inset = kShadowInsetDip * scale;
+        const float accent_height = std::max(2.0F, std::round(2.0F * scale));
         const auto rounded_rect = D2D1::RoundedRect(
             D2D1::RectF(0.5F, 0.5F, static_cast<float>(width_px_) - 0.5F, static_cast<float>(height_px_) - 0.5F),
             corner_radius,
@@ -570,12 +653,38 @@ void OverlayWindow::Render() {
 
         dc_render_target_->FillRoundedRectangle(shadow_rect, shadow_brush_.Get());
         dc_render_target_->FillRoundedRectangle(rounded_rect, background_brush_.Get());
+        if (accent_opacity > 0.0F) {
+            border_brush_->SetOpacity(accent_opacity);
+            dc_render_target_->FillRoundedRectangle(
+                D2D1::RoundedRect(
+                    D2D1::RectF(
+                        10.0F * scale,
+                        static_cast<float>(height_px_) - accent_height - 7.0F * scale,
+                        static_cast<float>(width_px_) - 10.0F * scale,
+                        static_cast<float>(height_px_) - 5.0F * scale
+                    ),
+                    accent_height,
+                    accent_height
+                ),
+                border_brush_.Get()
+            );
+            border_brush_->SetOpacity(border_opacity);
+        }
         dc_render_target_->DrawRoundedRectangle(rounded_rect, border_brush_.Get(), border_width);
-        dc_render_target_->DrawTextLayout(
-            D2D1::Point2F(kPaddingXDip * scale, kPaddingYDip * scale),
-            text_layout_.Get(),
-            text_brush_.Get()
-        );
+        const D2D1_POINT_2F text_origin = D2D1::Point2F(kPaddingXDip * scale, kPaddingYDip * scale);
+        if (ShouldAnimateTail() && prefix_layout_ != nullptr) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - tail_animation_started_at_).count();
+            const float pulse = 0.5F + 0.5F * std::sin(static_cast<float>(elapsed_ms) / 120.0F);
+            const float tail_opacity = current_opacity_ * (0.58F + 0.20F * pulse);
+            text_brush_->SetOpacity(tail_opacity);
+            dc_render_target_->DrawTextLayout(text_origin, text_layout_.Get(), text_brush_.Get());
+            text_brush_->SetOpacity(current_opacity_);
+            dc_render_target_->DrawTextLayout(text_origin, prefix_layout_.Get(), text_brush_.Get());
+        } else {
+            text_brush_->SetOpacity(current_opacity_);
+            dc_render_target_->DrawTextLayout(text_origin, text_layout_.Get(), text_brush_.Get());
+        }
 
         hr = dc_render_target_->EndDraw();
     }
@@ -592,6 +701,13 @@ void OverlayWindow::Render() {
     } else {
         Log("render failed hr=" + HrToString(hr));
     }
+}
+
+bool OverlayWindow::ShouldAnimateTail() const {
+    return kind_ == L"interim"
+        && stable_prefix_utf16_len_ < text_.size()
+        && prefix_layout_ != nullptr
+        && current_opacity_ > 0.0F;
 }
 
 void OverlayWindow::ReleaseBitmapResources() {
@@ -622,12 +738,19 @@ void OverlayWindow::StartAnimation(float target_opacity) {
     if (style_.animation_ms <= 0) {
         current_opacity_ = target_opacity_;
         if (current_opacity_ <= 0.0F && window_visible_) {
+            KillTimer(hwnd_, kAnimationTimerId);
             ShowWindow(hwnd_, SW_HIDE);
             window_visible_ = false;
             visibility_state_ = VisibilityState::Hidden;
+            session_peak_width_px_ = 0;
         } else {
             visibility_state_ = VisibilityState::Visible;
             Render();
+            if (ShouldAnimateTail()) {
+                SetTimer(hwnd_, kAnimationTimerId, 16, nullptr);
+            } else {
+                KillTimer(hwnd_, kAnimationTimerId);
+            }
         }
         return;
     }
@@ -635,12 +758,18 @@ void OverlayWindow::StartAnimation(float target_opacity) {
 }
 
 void OverlayWindow::TickAnimation() {
-    const auto now = std::chrono::steady_clock::now();
-    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - animation_started_at_).count();
-    const int animation_duration = std::max(style_.animation_ms, 1);
-    const float t = std::clamp(static_cast<float>(elapsed_ms) / static_cast<float>(animation_duration), 0.0F, 1.0F);
-    const float eased = 1.0F - std::pow(1.0F - t, 3.0F);
-    current_opacity_ = animation_start_opacity_ + (target_opacity_ - animation_start_opacity_) * eased;
+    const bool opacity_animating = visibility_state_ == VisibilityState::Showing || visibility_state_ == VisibilityState::Hiding;
+    float t = 1.0F;
+    if (opacity_animating) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - animation_started_at_).count();
+        const int animation_duration = std::max(style_.animation_ms, 1);
+        t = std::clamp(static_cast<float>(elapsed_ms) / static_cast<float>(animation_duration), 0.0F, 1.0F);
+        const float eased = 1.0F - std::pow(1.0F - t, 3.0F);
+        current_opacity_ = animation_start_opacity_ + (target_opacity_ - animation_start_opacity_) * eased;
+    } else {
+        current_opacity_ = target_opacity_;
+    }
 
     if (current_opacity_ > 0.0F && !window_visible_) {
         ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
@@ -649,16 +778,21 @@ void OverlayWindow::TickAnimation() {
 
     Render();
 
-    if (t >= 1.0F) {
+    if (opacity_animating && t >= 1.0F) {
         current_opacity_ = target_opacity_;
-        KillTimer(hwnd_, kAnimationTimerId);
         if (current_opacity_ <= 0.0F && window_visible_) {
             ShowWindow(hwnd_, SW_HIDE);
             window_visible_ = false;
             visibility_state_ = VisibilityState::Hidden;
+            session_peak_width_px_ = 0;
         } else {
             visibility_state_ = VisibilityState::Visible;
         }
+    }
+    if (!opacity_animating && !ShouldAnimateTail()) {
+        KillTimer(hwnd_, kAnimationTimerId);
+    } else if (opacity_animating && t >= 1.0F && !ShouldAnimateTail()) {
+        KillTimer(hwnd_, kAnimationTimerId);
     }
 }
 

@@ -330,6 +330,9 @@ int WINAPI wWinMain(HINSTANCE instance_handle, HINSTANCE, PWSTR, int) {
                 payload->seq = static_cast<unsigned long long>(ParseInt(command->fields, "seq", 0));
                 const auto kind_it = command->fields.find("kind");
                 payload->kind = Utf8ToWide(kind_it != command->fields.end() ? kind_it->second : std::string("interim"));
+                payload->stable_prefix_utf16_len = static_cast<unsigned long long>(
+                    ParseInt(command->fields, "stable_prefix_utf16_len", 0)
+                );
                 PostMessageW(hwnd, overlay_ui::WM_APP_OVERLAY_SHOW, 0, reinterpret_cast<LPARAM>(payload.release()));
             } else if (command->cmd == "configure") {
                 auto style = std::make_unique<overlay_ui::OverlayStyle>();

@@ -20,6 +20,6 @@ def test_encode_overlay_command_supports_overlay_config_payload():
 
 
 def test_encode_overlay_command_supports_show_seq_and_kind():
-    line = encode_overlay_command("show", text="你好", seq="12", kind="interim")
+    line = encode_overlay_command("show", text="你好", seq="12", kind="interim", stable_prefix_utf16_len="1")
 
-    assert line == '{"cmd": "show", "text": "你好", "seq": "12", "kind": "interim"}'
+    assert line == '{"cmd": "show", "text": "你好", "seq": "12", "kind": "interim", "stable_prefix_utf16_len": "1"}'

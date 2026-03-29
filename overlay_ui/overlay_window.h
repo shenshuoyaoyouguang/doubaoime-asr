@@ -33,6 +33,7 @@ struct OverlayShowPayload {
     std::wstring text;
     unsigned long long seq = 0;
     std::wstring kind = L"interim";
+    unsigned long long stable_prefix_utf16_len = 0;
 };
 
 class OverlayWindow {
@@ -72,9 +73,11 @@ private:
     bool EnsureBitmapResources();
     void ApplyWindowAttributes();
     void RebuildLayout();
+    void RebuildPrefixLayout();
     void UpdateGeometry();
     void ReleaseBitmapResources();
     void Render();
+    bool ShouldAnimateTail() const;
     void StartAnimation(float target_opacity);
     void TickAnimation();
     void Log(const std::string& message) const;
@@ -88,15 +91,19 @@ private:
     OverlayStyle style_{};
 
     std::wstring text_;
+    std::wstring kind_ = L"interim";
+    unsigned long long stable_prefix_utf16_len_ = 0;
     unsigned long long last_seq_ = 0;
     float current_opacity_ = 0.0F;
     float target_opacity_ = 0.0F;
     float animation_start_opacity_ = 0.0F;
     std::chrono::steady_clock::time_point animation_started_at_{};
+    std::chrono::steady_clock::time_point tail_animation_started_at_{};
     int width_px_ = 0;
     int height_px_ = 0;
     int x_px_ = 0;
     int y_px_ = 0;
+    int session_peak_width_px_ = 0;
     float font_size_dip_ = 12.0F;
 
     Microsoft::WRL::ComPtr<ID2D1Factory> d2d_factory_;
@@ -104,6 +111,7 @@ private:
     Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_factory_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> text_format_;
     Microsoft::WRL::ComPtr<IDWriteTextLayout> text_layout_;
+    Microsoft::WRL::ComPtr<IDWriteTextLayout> prefix_layout_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> background_brush_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> border_brush_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> shadow_brush_;

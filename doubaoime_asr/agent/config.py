@@ -16,6 +16,32 @@ SUPPORTED_INJECTION_POLICIES = (
     INJECTION_POLICY_DIRECT_ONLY,
     INJECTION_POLICY_DIRECT_THEN_CLIPBOARD,
 )
+STREAMING_TEXT_MODE_SAFE_INLINE = "safe_inline"
+STREAMING_TEXT_MODE_OVERLAY_ONLY = "overlay_only"
+SUPPORTED_STREAMING_TEXT_MODES = (
+    STREAMING_TEXT_MODE_SAFE_INLINE,
+    STREAMING_TEXT_MODE_OVERLAY_ONLY,
+)
+POLISH_MODE_OFF = "off"
+POLISH_MODE_LIGHT = "light"
+POLISH_MODE_OLLAMA = "ollama"
+SUPPORTED_POLISH_MODES = (
+    POLISH_MODE_OFF,
+    POLISH_MODE_LIGHT,
+    POLISH_MODE_OLLAMA,
+)
+CAPTURE_OUTPUT_POLICY_OFF = "off"
+CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT = "mute_system_output"
+SUPPORTED_CAPTURE_OUTPUT_POLICIES = (
+    CAPTURE_OUTPUT_POLICY_OFF,
+    CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT,
+)
+DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+DEFAULT_OLLAMA_MODEL = "qwen35-opus-fixed:latest"
+DEFAULT_OLLAMA_KEEP_ALIVE = "15m"
+DEFAULT_OLLAMA_PROMPT_TEMPLATE = """润色下面这句语音识别文本：保留原意、数字和专有名词；删除口头语和重复；补上自然标点；只输出结果。
+{text}
+"""
 SUPPORTED_MODES = ("inject", "recognize")
 
 
@@ -70,13 +96,22 @@ class AgentConfig:
     microphone_device: int | str | None = None
     credential_path: str | None = None
     injection_policy: str = INJECTION_POLICY_DIRECT_THEN_CLIPBOARD
+    streaming_text_mode: str = STREAMING_TEXT_MODE_SAFE_INLINE
+    capture_output_policy: str = CAPTURE_OUTPUT_POLICY_OFF
     render_debounce_ms: int = 80
-    overlay_render_fps: int = 30
+    overlay_render_fps: int = 60
     overlay_font_size: int = 14
     overlay_max_width: int = 620
     overlay_opacity_percent: int = 92
     overlay_bottom_offset: int = 120
-    overlay_animation_ms: int = 150
+    overlay_animation_ms: int = 80
+    polish_mode: str = POLISH_MODE_LIGHT
+    ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
+    ollama_model: str = DEFAULT_OLLAMA_MODEL
+    polish_timeout_ms: int = 800
+    ollama_warmup_enabled: bool = True
+    ollama_keep_alive: str = DEFAULT_OLLAMA_KEEP_ALIVE
+    ollama_prompt_template: str = DEFAULT_OLLAMA_PROMPT_TEMPLATE
 
     @classmethod
     def default_dir(cls) -> Path:
@@ -152,6 +187,21 @@ class AgentConfig:
             if data.get("injection_policy") in SUPPORTED_INJECTION_POLICIES
             else base.injection_policy
         )
+        data["streaming_text_mode"] = (
+            data.get("streaming_text_mode")
+            if data.get("streaming_text_mode") in SUPPORTED_STREAMING_TEXT_MODES
+            else base.streaming_text_mode
+        )
+        data["capture_output_policy"] = (
+            data.get("capture_output_policy")
+            if data.get("capture_output_policy") in SUPPORTED_CAPTURE_OUTPUT_POLICIES
+            else base.capture_output_policy
+        )
+        data["polish_mode"] = (
+            data.get("polish_mode")
+            if data.get("polish_mode") in SUPPORTED_POLISH_MODES
+            else base.polish_mode
+        )
         data["render_debounce_ms"] = _clamp_int(data.get("render_debounce_ms"), base.render_debounce_ms, 0, 1000)
         data["overlay_render_fps"] = _clamp_int(data.get("overlay_render_fps"), base.overlay_render_fps, 1, 120)
         data["overlay_font_size"] = _clamp_int(data.get("overlay_font_size"), base.overlay_font_size, 10, 36)
@@ -173,6 +223,32 @@ class AgentConfig:
             base.overlay_animation_ms,
             0,
             600,
+        )
+        data["ollama_base_url"] = _sanitize_non_empty_text(
+            data.get("ollama_base_url"),
+            base.ollama_base_url,
+            strip_trailing_slash=True,
+        )
+        data["ollama_model"] = _sanitize_optional_text(data.get("ollama_model"))
+        data["polish_timeout_ms"] = _clamp_int(
+            data.get("polish_timeout_ms"),
+            base.polish_timeout_ms,
+            100,
+            5000,
+        )
+        data["ollama_warmup_enabled"] = _coerce_bool(
+            data.get("ollama_warmup_enabled"),
+            base.ollama_warmup_enabled,
+        )
+        data["ollama_keep_alive"] = _sanitize_non_empty_text(
+            data.get("ollama_keep_alive"),
+            base.ollama_keep_alive,
+        )
+        prompt_template = data.get("ollama_prompt_template")
+        data["ollama_prompt_template"] = (
+            prompt_template
+            if isinstance(prompt_template, str) and prompt_template.strip()
+            else base.ollama_prompt_template
         )
         return cls(**data)
 
@@ -251,3 +327,30 @@ def _clamp_int(value: Any, fallback: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         return fallback
     return max(minimum, min(maximum, number))
+
+
+def _sanitize_optional_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def _sanitize_non_empty_text(value: Any, fallback: str, *, strip_trailing_slash: bool = False) -> str:
+    if not isinstance(value, str):
+        return fallback
+    text = value.strip()
+    if strip_trailing_slash:
+        text = text.rstrip("/")
+    return text or fallback
+
+
+def _coerce_bool(value: Any, fallback: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return fallback

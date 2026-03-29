@@ -18,13 +18,29 @@ if "pywinauto" not in sys.modules:
     sys.modules["pywinauto.keyboard"] = keyboard_stub
 
 from doubaoime_asr.agent import stable_simple_app
-from doubaoime_asr.agent.config import AgentConfig, INJECTION_POLICY_DIRECT_ONLY
+from doubaoime_asr.agent.config import (
+    AgentConfig,
+    CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT,
+    INJECTION_POLICY_DIRECT_ONLY,
+    POLISH_MODE_OLLAMA,
+    STREAMING_TEXT_MODE_SAFE_INLINE,
+)
+from doubaoime_asr.agent.text_polisher import PolishResult
+
+
+class _DummyInjector:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, str, str]] = []
+
+    def replace_text(self, target, previous_text: str, new_text: str) -> None:
+        self.calls.append((target, previous_text, new_text))
 
 
 class _DummyInjectionManager:
     def __init__(self, logger, *, policy: str) -> None:
         self.logger = logger
         self.policy = policy
+        self.injector = _DummyInjector()
 
     def set_policy(self, policy: str) -> None:
         self.policy = policy
@@ -47,12 +63,76 @@ class _DummyPreview:
 class _DummyScheduler:
     def __init__(self, *args, **kwargs) -> None:
         self.configured: list[AgentConfig] = []
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
 
     def configure(self, config: AgentConfig) -> None:
         self.configured.append(config)
 
+    async def submit_interim(self, text: str) -> None:
+        self.calls.append(("interim", (text,)))
+
+    async def submit_final(self, text: str, *, kind: str) -> None:
+        self.calls.append(("final", (text, kind)))
+
     async def hide(self, reason: str) -> None:
-        return None
+        self.calls.append(("hide", (reason,)))
+
+
+class _DummyPolisher:
+    def __init__(self, logger, config: AgentConfig) -> None:
+        self.logger = logger
+        self.config = config
+        self.result = PolishResult(text="", applied_mode="off", latency_ms=0)
+        self.warmup_calls: list[bool] = []
+
+    def configure(self, config: AgentConfig) -> None:
+        self.config = config
+
+    async def polish(self, text: str) -> PolishResult:
+        if self.result.text:
+            return self.result
+        return PolishResult(text=text, applied_mode=self.config.polish_mode, latency_ms=0)
+
+    async def warmup(self) -> bool:
+        self.warmup_calls.append(True)
+        return True
+
+
+class _DummyCaptureOutputGuard:
+    def __init__(self, logger, *, policy: str) -> None:
+        self.logger = logger
+        self.policy = policy
+        self.activate_calls = 0
+        self.release_calls = 0
+
+    def configure(self, policy: str) -> None:
+        self.policy = policy
+
+    def activate(self) -> bool:
+        self.activate_calls += 1
+        return True
+
+    def release(self) -> bool:
+        self.release_calls += 1
+        return True
+
+
+class _BrokenComposition:
+    def __init__(self, *, rendered_text: str = "", final_text: str = "", fail_on: str = "render") -> None:
+        self.rendered_text = rendered_text
+        self.final_text = final_text
+        self.fail_on = fail_on
+
+    def render_interim(self, text: str) -> None:
+        if self.fail_on == "render":
+            raise RuntimeError("inline render failed")
+        self.rendered_text = text
+
+    def finalize(self, text: str) -> None:
+        if self.fail_on == "finalize":
+            raise RuntimeError("inline finalize failed")
+        self.rendered_text = text
+        self.final_text = text
 
 
 def _build_app(monkeypatch: pytest.MonkeyPatch, config: AgentConfig | None = None) -> stable_simple_app.StableVoiceInputApp:
@@ -60,6 +140,8 @@ def _build_app(monkeypatch: pytest.MonkeyPatch, config: AgentConfig | None = Non
     monkeypatch.setattr(stable_simple_app, "TextInjectionManager", _DummyInjectionManager)
     monkeypatch.setattr(stable_simple_app, "OverlayPreview", _DummyPreview)
     monkeypatch.setattr(stable_simple_app, "OverlayRenderScheduler", _DummyScheduler)
+    monkeypatch.setattr(stable_simple_app, "TextPolisher", _DummyPolisher)
+    monkeypatch.setattr(stable_simple_app, "SystemOutputMuteGuard", _DummyCaptureOutputGuard)
     return stable_simple_app.StableVoiceInputApp(config or AgentConfig(), enable_tray=False)
 
 
@@ -227,3 +309,228 @@ def test_apply_config_rolls_back_runtime_changes_after_save_failure(monkeypatch:
     assert app.preview.configured[-1] == old_config
     assert app.overlay_scheduler.configured[-1] == old_config
     assert app._status == "\u8bbe\u7f6e\u4fdd\u5b58\u5931\u8d25\uff0c\u5df2\u6062\u590d\u65e7\u914d\u7f6e"
+
+
+def test_handle_worker_final_uses_polished_text(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(polish_mode=POLISH_MODE_OLLAMA)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(3)
+    session.active = True
+    session.mode = "recognize"
+    app._session = session
+    app.text_polisher.result = PolishResult(text="润色后的文本。", applied_mode="ollama", latency_ms=120)
+
+    injected: list[str] = []
+
+    async def fake_inject(text: str) -> None:
+        injected.append(text)
+
+    monkeypatch.setattr(app, "_inject_final", fake_inject)
+
+    asyncio.run(app._handle_worker_event(3, {"type": "final", "text": "原文"}))
+
+    assert injected == ["润色后的文本。"]
+    assert app.overlay_scheduler.calls == [
+        ("final", ("原文", "final_raw")),
+        ("final", ("润色后的文本。", "final_committed")),
+    ]
+    assert app._status == "最终结果: 润色后的文本。"
+
+
+def test_handle_worker_final_fallback_status_uses_raw_text(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(polish_mode=POLISH_MODE_OLLAMA)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(4)
+    session.active = True
+    session.mode = "recognize"
+    app._session = session
+    app.text_polisher.result = PolishResult(
+        text="原始识别文本",
+        applied_mode="raw_fallback",
+        latency_ms=800,
+        fallback_reason="timeout",
+    )
+
+    monkeypatch.setattr(app, "_inject_final", lambda text: asyncio.sleep(0))
+
+    asyncio.run(app._handle_worker_event(4, {"type": "final", "text": "原始识别文本"}))
+
+    assert app.overlay_scheduler.calls == [("final", ("原始识别文本", "final_raw"))]
+    assert app._status == "润色超时，已使用原文: 原始识别文本"
+
+
+def test_handle_worker_interim_updates_inline_composition(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(9)
+    session.active = True
+    session.mode = "inject"
+    target = stable_simple_app.FocusTarget(hwnd=1, is_terminal=False)
+    session.target = target
+    session.inline_streaming_enabled = True
+    session.composition = stable_simple_app.CompositionSession(app.injection_manager.injector, target)
+    app._session = session
+
+    asyncio.run(app._handle_worker_event(9, {"type": "interim", "text": "你好啊"}))
+
+    assert app.overlay_scheduler.calls == [("interim", ("你好啊",))]
+    assert app.injection_manager.injector.calls == [(target, "", "你好啊")]
+    assert session.composition.rendered_text == "你好啊"
+
+
+def test_apply_inline_interim_blocks_final_fallback_after_inline_failure(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(10)
+    session.active = True
+    session.mode = "inject"
+    session.target = stable_simple_app.FocusTarget(hwnd=9, is_terminal=False)
+    session.inline_streaming_enabled = True
+    session.composition = _BrokenComposition(rendered_text="hel", fail_on="render")
+    app._session = session
+
+    asyncio.run(app._apply_inline_interim("hello"))
+
+    assert session.inline_streaming_enabled is False
+    assert session.final_injection_blocked is True
+    assert session.target is None
+    assert app._status == "实时上屏失败，仅保留识别"
+
+
+def test_inject_final_uses_inline_composition_when_available(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(11)
+    session.active = True
+    session.mode = "inject"
+    target = stable_simple_app.FocusTarget(hwnd=2, is_terminal=False)
+    session.target = target
+    session.inline_streaming_enabled = True
+    session.composition = stable_simple_app.CompositionSession(app.injection_manager.injector, target)
+    session.composition.render_interim("原文")
+    app._session = session
+
+    asyncio.run(app._inject_final("最终文本"))
+
+    assert app.injection_manager.injector.calls == [
+        (target, "", "原文"),
+        (target, "原文", "最终文本"),
+    ]
+    assert session.composition.final_text == "最终文本"
+
+
+def test_inject_final_does_not_fallback_type_when_inline_text_exists(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(12)
+    session.active = True
+    session.mode = "inject"
+    target = stable_simple_app.FocusTarget(hwnd=4, is_terminal=False)
+    session.target = target
+    session.inline_streaming_enabled = True
+    session.composition = _BrokenComposition(rendered_text="hel", fail_on="finalize")
+    app._session = session
+
+    inject_calls: list[str] = []
+
+    async def fake_inject_text(target, text: str):
+        inject_calls.append(text)
+        return SimpleNamespace(
+            method="direct",
+            target_profile="default",
+            clipboard_touched=False,
+            restored_clipboard=False,
+        )
+
+    monkeypatch.setattr(app.injection_manager, "inject_text", fake_inject_text, raising=False)
+
+    asyncio.run(app._inject_final("hello"))
+
+    assert inject_calls == []
+    assert session.inline_streaming_enabled is False
+    assert session.final_injection_blocked is True
+    assert session.target is None
+    assert app._status == "实时上屏失败，仅保留识别"
+
+
+def test_should_enable_inline_streaming_skips_terminal_targets(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    app = _build_app(monkeypatch, config)
+
+    assert app._should_enable_inline_streaming(stable_simple_app.FocusTarget(hwnd=3, is_terminal=False)) is True
+    assert app._should_enable_inline_streaming(stable_simple_app.FocusTarget(hwnd=3, is_terminal=True)) is False
+
+
+def test_handle_press_activates_capture_output(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="recognize", capture_output_policy=CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(5)
+
+    async def fake_ensure_worker() -> stable_simple_app.WorkerSession:
+        return session
+
+    commands: list[str] = []
+
+    async def fake_send_worker_command(command: str) -> None:
+        commands.append(command)
+
+    monkeypatch.setattr(app, "_ensure_worker", fake_ensure_worker)
+    monkeypatch.setattr(app, "_send_worker_command", fake_send_worker_command)
+
+    asyncio.run(app._handle_press())
+
+    assert commands == ["START"]
+    assert app.capture_output_guard.activate_calls == 1
+    assert app._status == "启动识别中…"
+
+
+def test_handle_press_releases_capture_output_when_start_fails(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="recognize", capture_output_policy=CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(6)
+
+    async def fake_ensure_worker() -> stable_simple_app.WorkerSession:
+        return session
+
+    async def fake_send_worker_command(command: str) -> None:
+        raise RuntimeError("boom")
+
+    restart_calls: list[bool] = []
+
+    async def fake_restart_worker() -> None:
+        restart_calls.append(True)
+
+    monkeypatch.setattr(app, "_ensure_worker", fake_ensure_worker)
+    monkeypatch.setattr(app, "_send_worker_command", fake_send_worker_command)
+    monkeypatch.setattr(app, "_restart_worker", fake_restart_worker)
+
+    asyncio.run(app._handle_press())
+
+    assert app.capture_output_guard.activate_calls == 1
+    assert app.capture_output_guard.release_calls == 1
+    assert restart_calls == [True]
+    assert app._status == "启动识别失败，请查看 controller.log"
+
+
+def test_clear_active_session_releases_capture_output(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="recognize", capture_output_policy=CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(7)
+    session.active = True
+    app._session = session
+
+    asyncio.run(app._clear_active_session())
+
+    assert session.active is False
+    assert app.capture_output_guard.release_calls == 1
+
+
+def test_handle_worker_exit_releases_capture_output(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="recognize", capture_output_policy=CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(8)
+    app._session = session
+
+    asyncio.run(app._handle_worker_exit(8, 1))
+
+    assert app.capture_output_guard.release_calls == 1
