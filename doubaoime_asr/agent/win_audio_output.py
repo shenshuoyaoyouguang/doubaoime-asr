@@ -162,7 +162,7 @@ class _com_scope:
 def _ole32():
     if sys.platform != "win32":
         raise AudioOutputMuteError("capture output mute is only available on Windows")
-    dll = ctypes.OleDLL("ole32")
+    dll = ctypes.WinDLL("ole32")
     dll.CoInitializeEx.argtypes = [ctypes.c_void_p, DWORD]
     dll.CoInitializeEx.restype = HRESULT
     dll.CoUninitialize.argtypes = []

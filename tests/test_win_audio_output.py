@@ -97,3 +97,23 @@ def test_release_clears_stale_state_after_restore_failure(monkeypatch: pytest.Mo
         guard.release()
     assert guard.activate() is True
     assert mute_calls == ["speaker-1", "speaker-2"]
+
+
+def test_com_scope_tolerates_changed_thread_mode(monkeypatch: pytest.MonkeyPatch):
+    class _FakeOle32:
+        def __init__(self) -> None:
+            self.uninitialize_calls = 0
+
+        def CoInitializeEx(self, _reserved, _coinit):
+            return win_audio_output._RPC_E_CHANGED_MODE
+
+        def CoUninitialize(self):
+            self.uninitialize_calls += 1
+
+    fake_ole32 = _FakeOle32()
+    monkeypatch.setattr(win_audio_output, "_ole32", lambda: fake_ole32)
+
+    with win_audio_output._com_scope():
+        pass
+
+    assert fake_ole32.uninitialize_calls == 0
