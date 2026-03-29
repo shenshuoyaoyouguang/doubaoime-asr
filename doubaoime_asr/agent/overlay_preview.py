@@ -24,8 +24,15 @@ class TkOverlayPreview:
         self._thread.start()
         self._started.wait(timeout=2)
 
-    def show(self, text: str, *, seq: int = 0, kind: str = "interim") -> None:
-        self._queue.put(("show", (text, seq, kind)))
+    def show(
+        self,
+        text: str,
+        *,
+        seq: int = 0,
+        kind: str = "interim",
+        stable_prefix_utf16_len: int = 0,
+    ) -> None:
+        self._queue.put(("show", (text, seq, kind, stable_prefix_utf16_len)))
 
     def hide(self, reason: str = "") -> None:
         self._queue.put(("hide", reason))
@@ -86,7 +93,7 @@ class TkOverlayPreview:
                 while True:
                     action, payload = self._queue.get_nowait()
                     if action == "show" and isinstance(payload, tuple):
-                        text, seq, _kind = payload
+                        text, seq, _kind, _stable_prefix_utf16_len = payload
                         if seq < self._last_seq:
                             continue
                         self._last_seq = seq
@@ -124,8 +131,21 @@ class OverlayPreview:
     def start(self) -> None:
         self._ensure_backend_started()
 
-    def show(self, text: str, *, seq: int = 0, kind: str = "interim") -> None:
-        self._invoke("show", text, seq=seq, kind=kind)
+    def show(
+        self,
+        text: str,
+        *,
+        seq: int = 0,
+        kind: str = "interim",
+        stable_prefix_utf16_len: int = 0,
+    ) -> None:
+        self._invoke(
+            "show",
+            text,
+            seq=seq,
+            kind=kind,
+            stable_prefix_utf16_len=stable_prefix_utf16_len,
+        )
 
     def hide(self, reason: str = "") -> None:
         self._invoke("hide", reason=reason)

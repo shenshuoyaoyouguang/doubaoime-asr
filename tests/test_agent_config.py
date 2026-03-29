@@ -6,6 +6,7 @@ from doubaoime_asr.agent.config import (
     CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT,
     INJECTION_POLICY_DIRECT_THEN_CLIPBOARD,
     POLISH_MODE_OLLAMA,
+    STREAMING_TEXT_MODE_OVERLAY_ONLY,
     discover_preferred_credential_path,
 )
 
@@ -20,6 +21,7 @@ def test_agent_config_roundtrip(tmp_path: Path):
         microphone_device="USB Mic",
         credential_path=str(tmp_path / "credentials.json"),
         injection_policy=INJECTION_POLICY_DIRECT_THEN_CLIPBOARD,
+        streaming_text_mode=STREAMING_TEXT_MODE_OVERLAY_ONLY,
         capture_output_policy=CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT,
         render_debounce_ms=120,
         polish_mode=POLISH_MODE_OLLAMA,
@@ -50,6 +52,9 @@ def test_agent_config_creates_default_file(tmp_path: Path, monkeypatch):
 
     assert Path(loaded.default_path()).exists()
     assert AgentConfig.default_log_path() == tmp_path / "DoubaoVoiceInput" / "logs" / "agent.log"
+    assert loaded.overlay_render_fps == 60
+    assert loaded.overlay_animation_ms == 80
+    assert loaded.streaming_text_mode == "safe_inline"
 
 
 def test_discover_preferred_credential_path_prefers_cwd(tmp_path: Path, monkeypatch):
@@ -125,6 +130,15 @@ def test_agent_config_load_sanitizes_polish_fields(tmp_path: Path):
     assert loaded.ollama_warmup_enabled is False
     assert loaded.ollama_keep_alive == "15m"
     assert "{text}" in loaded.ollama_prompt_template
+
+
+def test_agent_config_load_sanitizes_streaming_text_mode(tmp_path: Path):
+    path = tmp_path / "config.json"
+    path.write_text('{"streaming_text_mode":"invalid"}', encoding="utf-8")
+
+    loaded = AgentConfig.load(path)
+
+    assert loaded.streaming_text_mode == "safe_inline"
 
 
 def test_agent_config_load_sanitizes_capture_output_policy(tmp_path: Path):

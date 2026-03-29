@@ -16,6 +16,12 @@ SUPPORTED_INJECTION_POLICIES = (
     INJECTION_POLICY_DIRECT_ONLY,
     INJECTION_POLICY_DIRECT_THEN_CLIPBOARD,
 )
+STREAMING_TEXT_MODE_SAFE_INLINE = "safe_inline"
+STREAMING_TEXT_MODE_OVERLAY_ONLY = "overlay_only"
+SUPPORTED_STREAMING_TEXT_MODES = (
+    STREAMING_TEXT_MODE_SAFE_INLINE,
+    STREAMING_TEXT_MODE_OVERLAY_ONLY,
+)
 POLISH_MODE_OFF = "off"
 POLISH_MODE_LIGHT = "light"
 POLISH_MODE_OLLAMA = "ollama"
@@ -90,14 +96,15 @@ class AgentConfig:
     microphone_device: int | str | None = None
     credential_path: str | None = None
     injection_policy: str = INJECTION_POLICY_DIRECT_THEN_CLIPBOARD
+    streaming_text_mode: str = STREAMING_TEXT_MODE_SAFE_INLINE
     capture_output_policy: str = CAPTURE_OUTPUT_POLICY_OFF
     render_debounce_ms: int = 80
-    overlay_render_fps: int = 30
+    overlay_render_fps: int = 60
     overlay_font_size: int = 14
     overlay_max_width: int = 620
     overlay_opacity_percent: int = 92
     overlay_bottom_offset: int = 120
-    overlay_animation_ms: int = 150
+    overlay_animation_ms: int = 80
     polish_mode: str = POLISH_MODE_LIGHT
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
     ollama_model: str = DEFAULT_OLLAMA_MODEL
@@ -179,6 +186,11 @@ class AgentConfig:
             data.get("injection_policy")
             if data.get("injection_policy") in SUPPORTED_INJECTION_POLICIES
             else base.injection_policy
+        )
+        data["streaming_text_mode"] = (
+            data.get("streaming_text_mode")
+            if data.get("streaming_text_mode") in SUPPORTED_STREAMING_TEXT_MODES
+            else base.streaming_text_mode
         )
         data["capture_output_policy"] = (
             data.get("capture_output_policy")

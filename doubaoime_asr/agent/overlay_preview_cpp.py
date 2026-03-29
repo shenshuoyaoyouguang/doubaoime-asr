@@ -145,8 +145,21 @@ class OverlayPreviewCpp:
             self.stop()
             raise RuntimeError(self._startup_error or "overlay_ui failed before ready")
 
-    def show(self, text: str, *, seq: int = 0, kind: str = "interim") -> None:
-        self._send_command("show", text=text, seq=str(seq), kind=kind)
+    def show(
+        self,
+        text: str,
+        *,
+        seq: int = 0,
+        kind: str = "interim",
+        stable_prefix_utf16_len: int = 0,
+    ) -> None:
+        self._send_command(
+            "show",
+            text=text,
+            seq=str(seq),
+            kind=kind,
+            stable_prefix_utf16_len=str(max(0, int(stable_prefix_utf16_len))),
+        )
 
     def hide(self, reason: str = "") -> None:
         self._send_command("hide", reason=reason)

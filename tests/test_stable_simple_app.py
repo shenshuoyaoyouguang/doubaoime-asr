@@ -23,14 +23,24 @@ from doubaoime_asr.agent.config import (
     CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT,
     INJECTION_POLICY_DIRECT_ONLY,
     POLISH_MODE_OLLAMA,
+    STREAMING_TEXT_MODE_SAFE_INLINE,
 )
 from doubaoime_asr.agent.text_polisher import PolishResult
+
+
+class _DummyInjector:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, str, str]] = []
+
+    def replace_text(self, target, previous_text: str, new_text: str) -> None:
+        self.calls.append((target, previous_text, new_text))
 
 
 class _DummyInjectionManager:
     def __init__(self, logger, *, policy: str) -> None:
         self.logger = logger
         self.policy = policy
+        self.injector = _DummyInjector()
 
     def set_policy(self, policy: str) -> None:
         self.policy = policy
@@ -53,15 +63,19 @@ class _DummyPreview:
 class _DummyScheduler:
     def __init__(self, *args, **kwargs) -> None:
         self.configured: list[AgentConfig] = []
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
 
     def configure(self, config: AgentConfig) -> None:
         self.configured.append(config)
 
     async def submit_interim(self, text: str) -> None:
-        return None
+        self.calls.append(("interim", (text,)))
+
+    async def submit_final(self, text: str, *, kind: str) -> None:
+        self.calls.append(("final", (text, kind)))
 
     async def hide(self, reason: str) -> None:
-        return None
+        self.calls.append(("hide", (reason,)))
 
 
 class _DummyPolisher:
@@ -298,6 +312,10 @@ def test_handle_worker_final_uses_polished_text(monkeypatch: pytest.MonkeyPatch)
     asyncio.run(app._handle_worker_event(3, {"type": "final", "text": "原文"}))
 
     assert injected == ["润色后的文本。"]
+    assert app.overlay_scheduler.calls == [
+        ("final", ("原文", "final_raw")),
+        ("final", ("润色后的文本。", "final_committed")),
+    ]
     assert app._status == "最终结果: 润色后的文本。"
 
 
@@ -319,7 +337,57 @@ def test_handle_worker_final_fallback_status_uses_raw_text(monkeypatch: pytest.M
 
     asyncio.run(app._handle_worker_event(4, {"type": "final", "text": "原始识别文本"}))
 
+    assert app.overlay_scheduler.calls == [("final", ("原始识别文本", "final_raw"))]
     assert app._status == "润色超时，已使用原文: 原始识别文本"
+
+
+def test_handle_worker_interim_updates_inline_composition(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(9)
+    session.active = True
+    session.mode = "inject"
+    target = stable_simple_app.FocusTarget(hwnd=1, is_terminal=False)
+    session.target = target
+    session.inline_streaming_enabled = True
+    session.composition = stable_simple_app.CompositionSession(app.injection_manager.injector, target)
+    app._session = session
+
+    asyncio.run(app._handle_worker_event(9, {"type": "interim", "text": "你好啊"}))
+
+    assert app.overlay_scheduler.calls == [("interim", ("你好啊",))]
+    assert app.injection_manager.injector.calls == [(target, "", "你好啊")]
+    assert session.composition.rendered_text == "你好啊"
+
+
+def test_inject_final_uses_inline_composition_when_available(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(10)
+    session.active = True
+    session.mode = "inject"
+    target = stable_simple_app.FocusTarget(hwnd=2, is_terminal=False)
+    session.target = target
+    session.inline_streaming_enabled = True
+    session.composition = stable_simple_app.CompositionSession(app.injection_manager.injector, target)
+    session.composition.render_interim("原文")
+    app._session = session
+
+    asyncio.run(app._inject_final("最终文本"))
+
+    assert app.injection_manager.injector.calls == [
+        (target, "", "原文"),
+        (target, "原文", "最终文本"),
+    ]
+    assert session.composition.final_text == "最终文本"
+
+
+def test_should_enable_inline_streaming_skips_terminal_targets(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    app = _build_app(monkeypatch, config)
+
+    assert app._should_enable_inline_streaming(stable_simple_app.FocusTarget(hwnd=3, is_terminal=False)) is True
+    assert app._should_enable_inline_streaming(stable_simple_app.FocusTarget(hwnd=3, is_terminal=True)) is False
 
 
 def test_handle_press_activates_capture_output(monkeypatch: pytest.MonkeyPatch):

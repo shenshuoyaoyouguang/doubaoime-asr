@@ -29,6 +29,8 @@ def test_stable_cli_defaults_to_recognize(monkeypatch):
 
     assert getattr(args, "mode", None) is None
     assert config.polish_mode == "light"
+    assert config.overlay_render_fps == 60
+    assert config.streaming_text_mode == "safe_inline"
 
 
 def test_stable_cli_config_override(monkeypatch):
@@ -42,6 +44,8 @@ def test_stable_cli_config_override(monkeypatch):
             "f9",
             "--render-debounce-ms",
             "50",
+            "--streaming-text-mode",
+            "overlay_only",
             "--capture-output-policy",
             "mute_system_output",
             "--polish-mode",
@@ -62,6 +66,7 @@ def test_stable_cli_config_override(monkeypatch):
     assert config.hotkey_vk == 0x78
     assert config.hotkey_display == "F9"
     assert config.render_debounce_ms == 50
+    assert config.streaming_text_mode == "overlay_only"
     assert config.capture_output_policy == "mute_system_output"
     assert config.polish_mode == "ollama"
     assert config.ollama_base_url == "http://127.0.0.1:11434"

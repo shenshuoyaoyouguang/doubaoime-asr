@@ -11,12 +11,15 @@ import sys
 import threading
 from typing import Literal
 
+from .composition import CompositionSession
 from .config import (
     AgentConfig,
     POLISH_MODE_OLLAMA,
+    STREAMING_TEXT_MODE_SAFE_INLINE,
     SUPPORTED_CAPTURE_OUTPUT_POLICIES,
     SUPPORTED_INJECTION_POLICIES,
     SUPPORTED_POLISH_MODES,
+    SUPPORTED_STREAMING_TEXT_MODES,
 )
 from .injection_manager import TextInjectionManager
 from .input_injector import FocusChangedError, FocusTarget
@@ -49,8 +52,18 @@ class WorkerSession:
     ready: bool = False
     streaming_started: bool = False
     pending_stop: bool = False
+    composition: CompositionSession | None = None
+    inline_streaming_enabled: bool = False
+    final_injection_blocked: bool = False
 
-    def begin(self, target: FocusTarget | None, mode: Mode) -> None:
+    def begin(
+        self,
+        target: FocusTarget | None,
+        mode: Mode,
+        *,
+        composition: CompositionSession | None = None,
+        inline_streaming_enabled: bool = False,
+    ) -> None:
         self.active = True
         self.target = target
         self.mode = mode
@@ -58,6 +71,9 @@ class WorkerSession:
         self.ready = False
         self.streaming_started = False
         self.pending_stop = False
+        self.composition = composition
+        self.inline_streaming_enabled = inline_streaming_enabled
+        self.final_injection_blocked = False
 
     def clear_active(self) -> None:
         self.active = False
@@ -67,6 +83,9 @@ class WorkerSession:
         self.ready = False
         self.streaming_started = False
         self.pending_stop = False
+        self.composition = None
+        self.inline_streaming_enabled = False
+        self.final_injection_blocked = False
 
 
 class StableVoiceInputApp:
@@ -230,14 +249,24 @@ class StableVoiceInputApp:
             return
 
         target: FocusTarget | None = None
+        composition: CompositionSession | None = None
+        inline_streaming_enabled = False
         if self.mode == "inject":
             target = self.injection_manager.capture_target()
             if target is None:
                 self.set_status("未检测到可写入焦点")
                 return
             self.logger.info("captured_target hwnd=%s focus_hwnd=%s", target.hwnd, target.focus_hwnd)
+            if self._should_enable_inline_streaming(target):
+                composition = CompositionSession(self.injection_manager.injector, target)
+                inline_streaming_enabled = True
 
-        session.begin(target, self.mode)
+        session.begin(
+            target,
+            self.mode,
+            composition=composition,
+            inline_streaming_enabled=inline_streaming_enabled,
+        )
         capture_output_warning = self._activate_capture_output()
         try:
             await self._send_worker_command("START")
@@ -422,11 +451,16 @@ class StableVoiceInputApp:
                 if self.console:
                     print(f"\r[识别中] {text}", end="", flush=True)
                 await self.overlay_scheduler.submit_interim(text)
+                await self._apply_inline_interim(text)
                 self.set_status(f"识别中: {text[-24:]}")
         elif event_type == "final":
-            await self.overlay_scheduler.hide("final")
             raw_text = str(event.get("text", ""))
+            if raw_text:
+                await self.overlay_scheduler.submit_final(raw_text, kind="final_raw")
+                await self._prepare_final_text(raw_text)
             result = await self._resolve_final_text(raw_text)
+            if result.text and result.text != raw_text:
+                await self.overlay_scheduler.submit_final(result.text, kind="final_committed")
             self.set_status(self._status_for_final_result(result, raw_text))
             if self.console:
                 print(f"\r[最终] {result.text}          ", flush=True)
@@ -445,7 +479,23 @@ class StableVoiceInputApp:
     async def _inject_final(self, text: str) -> None:
         if self._session is None or self._session.mode != "inject":
             return
-        if self._session.target is None:
+        if self._session.target is None or self._session.final_injection_blocked:
+            return
+        if self._session.composition is not None and self._session.inline_streaming_enabled:
+            try:
+                if self._session.composition.rendered_text != text or self._session.composition.final_text != text:
+                    self._session.composition.finalize(text)
+                self.logger.info("inject_success method=inline_composition")
+            except FocusChangedError:
+                self._session.final_injection_blocked = True
+                self._session.target = None
+                self.logger.warning("inject_focus_changed")
+                self.set_status("焦点已变化，仅保留识别")
+            except Exception:
+                self._session.inline_streaming_enabled = False
+                self.logger.exception("inject_inline_final_failed")
+                self.set_status("实时上屏失败，已回退为最终上屏")
+                await self._inject_final(text)
             return
         try:
             result = await self.injection_manager.inject_text(self._session.target, text)
@@ -467,6 +517,53 @@ class StableVoiceInputApp:
         if self.config.polish_mode == POLISH_MODE_OLLAMA and raw_text.strip():
             self.set_status("润色中…")
         return await self.text_polisher.polish(raw_text)
+
+    def _should_enable_inline_streaming(self, target: FocusTarget) -> bool:
+        return (
+            self.mode == "inject"
+            and self.config.streaming_text_mode == STREAMING_TEXT_MODE_SAFE_INLINE
+            and not target.is_terminal
+        )
+
+    async def _apply_inline_interim(self, text: str) -> None:
+        if self._session is None or not self._session.inline_streaming_enabled:
+            return
+        composition = self._session.composition
+        if composition is None:
+            return
+        if composition.rendered_text == text:
+            return
+        try:
+            composition.render_interim(text)
+        except FocusChangedError:
+            self._session.inline_streaming_enabled = False
+            self._session.final_injection_blocked = True
+            self._session.target = None
+            self.logger.warning("inline_streaming_focus_changed")
+            self.set_status("焦点已变化，仅保留识别")
+        except Exception:
+            self._session.inline_streaming_enabled = False
+            self.logger.exception("inline_streaming_failed")
+
+    async def _prepare_final_text(self, text: str) -> None:
+        if self._session is None or not self._session.inline_streaming_enabled:
+            return
+        composition = self._session.composition
+        if composition is None:
+            return
+        if composition.rendered_text == text and composition.final_text == text:
+            return
+        try:
+            composition.finalize(text)
+        except FocusChangedError:
+            self._session.inline_streaming_enabled = False
+            self._session.final_injection_blocked = True
+            self._session.target = None
+            self.logger.warning("inline_final_focus_changed")
+            self.set_status("焦点已变化，仅保留识别")
+        except Exception:
+            self._session.inline_streaming_enabled = False
+            self.logger.exception("inline_final_prepare_failed")
 
     def _status_for_final_result(self, result: PolishResult, raw_text: str) -> str:
         if result.applied_mode != "raw_fallback":
@@ -815,6 +912,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="direct_only 仅直接输入；direct_then_clipboard 失败时允许剪贴板回退",
     )
     parser.add_argument(
+        "--streaming-text-mode",
+        choices=SUPPORTED_STREAMING_TEXT_MODES,
+        default=argparse.SUPPRESS,
+        help="safe_inline 安全编辑框实时上屏；overlay_only 仅显示浮层",
+    )
+    parser.add_argument(
         "--capture-output-policy",
         choices=SUPPORTED_CAPTURE_OUTPUT_POLICIES,
         default=argparse.SUPPRESS,
@@ -861,6 +964,8 @@ def build_config_from_args(args: argparse.Namespace | None = None) -> AgentConfi
         config.credential_path = args.credential_path
     if getattr(args, "injection_policy", None):
         config.injection_policy = args.injection_policy
+    if getattr(args, "streaming_text_mode", None):
+        config.streaming_text_mode = args.streaming_text_mode
     if getattr(args, "capture_output_policy", None):
         config.capture_output_policy = args.capture_output_policy
     if getattr(args, "polish_mode", None):
