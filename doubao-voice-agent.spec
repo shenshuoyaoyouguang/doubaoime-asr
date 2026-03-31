@@ -4,6 +4,14 @@ from pathlib import Path
 
 
 ROOT = Path(globals().get("SPECPATH", Path.cwd()))
+PATHEX = [str(ROOT)]
+HIDDEN_IMPORTS = [
+    'doubaoime_asr',
+    'doubaoime_asr.agent',
+    'doubaoime_asr.agent.stable_main',
+    'doubaoime_asr.agent.stable_simple_app',
+    'doubaoime_asr.agent.worker_main',
+]
 
 
 def find_overlay_binary() -> list[tuple[str, str]]:
@@ -21,10 +29,10 @@ def find_overlay_binary() -> list[tuple[str, str]]:
 
 a = Analysis(
     ['scripts\\voice_agent_entry.py'],
-    pathex=[],
+    pathex=PATHEX,
     binaries=find_overlay_binary(),
     datas=[('opus.dll', '.'), ('libgcc_s_seh-1.dll', '.'), ('libwinpthread-1.dll', '.')],
-    hiddenimports=[],
+    hiddenimports=HIDDEN_IMPORTS,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

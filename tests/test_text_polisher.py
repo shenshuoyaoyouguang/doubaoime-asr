@@ -27,6 +27,26 @@ def test_apply_light_polish_removes_fillers_and_punctuation_noise():
     assert apply_light_polish("嗯 这个 这个方案可以啊") == "这个方案可以。"
 
 
+def test_apply_light_polish_preserves_command_like_text_without_forced_period():
+    assert apply_light_polish('嗯 git commit -m "feat: 增加功能"') == 'git commit -m "feat: 增加功能"'
+
+
+def test_apply_light_polish_preserves_paths_urls_and_shortcuts():
+    assert apply_light_polish("进入 C:\\Users\\Admin 目录") == "进入 C:\\Users\\Admin 目录"
+    assert apply_light_polish("访问 https://github.com/anthropics/claude-code") == "访问 https://github.com/anthropics/claude-code"
+    assert apply_light_polish("按下 Ctrl + Shift + P 打开命令面板") == "按下 Ctrl + Shift + P 打开命令面板"
+
+
+def test_apply_light_polish_preserves_filename_references_without_forced_period():
+    assert apply_light_polish("修改 settings.json 文件") == "修改 settings.json 文件"
+
+
+def test_apply_light_polish_skips_period_for_search_like_fragments():
+    assert apply_light_polish("系统架构设计") == "系统架构设计"
+    assert apply_light_polish("北京天气") == "北京天气"
+    assert apply_light_polish("This is a test") == "This is a test"
+
+
 def test_polish_off_returns_raw_text():
     polisher = TextPolisher(logging.getLogger("polisher-test"), AgentConfig(polish_mode=POLISH_MODE_OFF))
 

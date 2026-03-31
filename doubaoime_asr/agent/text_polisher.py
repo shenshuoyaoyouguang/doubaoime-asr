@@ -36,10 +36,31 @@ _FILLER_PREFIX_RE = re.compile(
     r"(^|[，。！？；、\s])(?:嗯+|呃+|额+|啊+|那个|就是)(?=[，。！？；、\s]+)",
 )
 _FILLER_SUFFIX_RE = re.compile(r"(?:啊+|呢|吧)(?=$|[。！？；\n])")
-_REPEATED_TOKEN_RE = re.compile(r"([一-龥A-Za-z0-9]{1,8})(?:[，,\s]+\1){1,}")
-_REPEATED_CJK_PHRASE_RE = re.compile(r"([一-龥]{2,4})\1+")
+_REPEATED_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9])([一-龥A-Za-z0-9]{1,8})(?:[，,\s]+\1){1,}(?![A-Za-z0-9])",
+)
+_REPEATED_FILLER_PHRASE_RE = re.compile(r"(这个|那个|就是|然后)\1+")
 _SPACE_AROUND_CJK_PUNCT_RE = re.compile(r"\s*([，。！？；：、])\s*")
 _TRAILING_SENTENCE_MARK_RE = re.compile(r"[。！？；]$")
+_CJK_CHAR_RE = re.compile(r"[一-龥]")
+_COMMAND_PREFIX_RE = re.compile(
+    r"^(?:git|npm|pnpm|yarn|pip|python|py|node|npx|cd|ls|dir|cp|mv|rm|mkdir)(?:\s|$)",
+    re.IGNORECASE,
+)
+_URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+_WINDOWS_PATH_RE = re.compile(r"[A-Za-z]:\\(?:[^\\\s]+\\?)*")
+_UNIX_PATH_RE = re.compile(r"(?:^|[\s(])(?:~?/|/)[^\s]+")
+_FILENAME_RE = re.compile(r"\b[\w.-]+\.(?:json|py|md|yaml|yml|toml|exe)\b", re.IGNORECASE)
+_SHORTCUT_RE = re.compile(r"\b[A-Za-z]{1,10}(?:\s*\+\s*[A-Za-z]{1,10})+\b")
+_SEARCH_LIKE_SUFFIXES: Final[tuple[str, ...]] = (
+    "设计",
+    "教程",
+    "方案",
+    "文档",
+    "配置",
+    "指南",
+    "天气",
+)
 
 
 class OllamaUnavailableError(RuntimeError):
@@ -66,6 +87,51 @@ class PolishResult:
     fallback_reason: str | None = None
 
 
+def _looks_like_technical_text(text: str) -> bool:
+    candidate = text.strip()
+    if not candidate:
+        return False
+    if _URL_RE.search(candidate):
+        return True
+    if _WINDOWS_PATH_RE.search(candidate):
+        return True
+    if _UNIX_PATH_RE.search(candidate):
+        return True
+    if _FILENAME_RE.search(candidate):
+        return True
+    if _COMMAND_PREFIX_RE.search(candidate):
+        return True
+    if _SHORTCUT_RE.search(candidate):
+        return True
+    if "--" in candidate:
+        return True
+    return False
+
+
+def _looks_like_search_fragment(text: str) -> bool:
+    candidate = text.strip()
+    if not candidate or "\n" in candidate:
+        return False
+    if _looks_like_technical_text(candidate):
+        return True
+    if not _CJK_CHAR_RE.search(candidate):
+        return True
+    if len(candidate) <= 4:
+        return True
+    return any(candidate.endswith(suffix) for suffix in _SEARCH_LIKE_SUFFIXES)
+
+
+def _should_append_period(text: str) -> bool:
+    candidate = text.strip()
+    if not candidate or "\n" in candidate:
+        return False
+    if _TRAILING_SENTENCE_MARK_RE.search(candidate):
+        return False
+    if _looks_like_search_fragment(candidate):
+        return False
+    return True
+
+
 def apply_light_polish(text: str) -> str:
     candidate = text.strip()
     if not candidate:
@@ -77,7 +143,7 @@ def apply_light_polish(text: str) -> str:
     candidate = re.sub(r"([。！？；]?)\s*(啊+|呢|吧)$", r"\1", candidate)
     candidate = re.sub(r"(^|[\n。！？；])\s+", r"\1", candidate)
     candidate = _REPEATED_TOKEN_RE.sub(r"\1", candidate)
-    candidate = _REPEATED_CJK_PHRASE_RE.sub(r"\1", candidate)
+    candidate = _REPEATED_FILLER_PHRASE_RE.sub(r"\1", candidate)
     candidate = candidate.replace("...", "……")
     candidate = re.sub(r"([，。！？；：、])\1+", r"\1", candidate)
     candidate = _SPACE_AROUND_CJK_PUNCT_RE.sub(r"\1", candidate)
@@ -87,7 +153,7 @@ def apply_light_polish(text: str) -> str:
 
     if not candidate:
         return text.strip()
-    if "\n" not in candidate and not _TRAILING_SENTENCE_MARK_RE.search(candidate):
+    if _should_append_period(candidate):
         candidate = f"{candidate}。"
     return candidate
 

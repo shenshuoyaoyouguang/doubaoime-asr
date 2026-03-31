@@ -25,6 +25,10 @@ from doubaoime_asr.agent.config import (
     POLISH_MODE_OLLAMA,
     STREAMING_TEXT_MODE_SAFE_INLINE,
 )
+from doubaoime_asr.agent.session_manager import (
+    WorkerSession as RuntimeWorkerSession,
+    WorkerSessionState,
+)
 from doubaoime_asr.agent.text_polisher import PolishResult
 
 
@@ -185,6 +189,27 @@ def _build_session(session_id: int) -> stable_simple_app.WorkerSession:
         )
 
     return asyncio.run(create_session())
+
+
+def _build_runtime_session(
+    session_id: int,
+    *,
+    mode: str = "inject",
+    target: stable_simple_app.FocusTarget | None = None,
+) -> RuntimeWorkerSession:
+    session = RuntimeWorkerSession(
+        session_id=session_id,
+        process=SimpleNamespace(returncode=None, stdin=None),
+    )
+    session.begin(target, mode)
+    session.transition_to(WorkerSessionState.STREAMING)
+    return session
+
+
+def test_build_app_binds_session_manager_event_bridge(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+
+    assert app._coordinator.session_manager._on_event is not None
 
 
 def test_handle_worker_exit_ignores_stale_session(monkeypatch: pytest.MonkeyPatch):
@@ -410,6 +435,72 @@ def test_handle_worker_interim_updates_inline_composition(monkeypatch: pytest.Mo
     assert session.composition.rendered_text == "你好啊"
 
 
+def test_handle_worker_event_ignores_stale_session_id(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    session = _build_session(22)
+    session.active = True
+    app._session = session
+    clear_calls: list[int] = []
+
+    async def fake_clear() -> None:
+        clear_calls.append(1)
+
+    monkeypatch.setattr(app, "_clear_active_session", fake_clear)
+
+    asyncio.run(app._handle_worker_event(21, {"type": "finished"}))
+
+    assert clear_calls == []
+    assert app.overlay_scheduler.calls == []
+    assert session.active is True
+
+
+def test_runtime_inline_callbacks_use_injection_service_session(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    app = _build_app(monkeypatch, config)
+    target = stable_simple_app.FocusTarget(hwnd=21, is_terminal=False)
+    runtime_session = _build_runtime_session(21, target=target)
+    app._coordinator.session_manager._session = runtime_session
+    composition = app._coordinator.injection_service.begin_session(
+        target,
+        "inject",
+        inline_streaming_enabled=True,
+    )
+
+    assert composition is not None
+
+    asyncio.run(app._coordinator.injection_service.apply_inline_interim("你好"))
+    asyncio.run(app._coordinator._inject_final("你好啊"))
+
+    assert app.injection_manager.injector.calls == [
+        (target, "", "你好"),
+        (target, "你好", "你好啊"),
+    ]
+    assert composition.rendered_text == "你好啊"
+    assert composition.final_text == "你好啊"
+
+
+def test_session_compat_wrapper_begin_accepts_runtime_kwargs(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    target = stable_simple_app.FocusTarget(hwnd=31, is_terminal=False)
+    runtime_session = RuntimeWorkerSession(
+        session_id=31,
+        process=SimpleNamespace(returncode=None, stdin=None),
+        state=WorkerSessionState.READY,
+    )
+    wrapped = stable_simple_app._SessionCompat.wrap(runtime_session)
+
+    wrapped.begin(
+        target,
+        "inject",
+        composition=stable_simple_app.CompositionSession(app.injection_manager.injector, target),
+        inline_streaming_enabled=True,
+    )
+
+    assert runtime_session.target == target
+    assert runtime_session.mode == "inject"
+    assert runtime_session.state == WorkerSessionState.STREAMING
+
+
 def test_handle_worker_audio_level_updates_overlay(monkeypatch: pytest.MonkeyPatch):
     app = _build_app(monkeypatch)
     session = _build_session(90)
@@ -589,6 +680,41 @@ def test_handle_press_activates_capture_output(monkeypatch: pytest.MonkeyPatch):
     assert app._status == "启动识别中（仅识别，不自动上屏）…"
 
 
+def test_handle_press_runtime_path_initializes_injection_service(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    app = _build_app(monkeypatch, config)
+    target = stable_simple_app.FocusTarget(hwnd=32, is_terminal=False)
+    runtime_session = RuntimeWorkerSession(
+        session_id=32,
+        process=SimpleNamespace(returncode=None, stdin=None),
+        state=WorkerSessionState.READY,
+    )
+    app._coordinator.session_manager._session = runtime_session
+    wrapped = stable_simple_app._SessionCompat.wrap(runtime_session)
+    commands: list[str] = []
+
+    async def fake_ensure_worker():
+        return wrapped
+
+    async def fake_send_worker_command(command: str) -> None:
+        commands.append(command)
+
+    app.injection_manager.captured_target = target
+    monkeypatch.setattr(app, "_ensure_worker", fake_ensure_worker)
+    monkeypatch.setattr(app, "_send_worker_command", fake_send_worker_command)
+
+    asyncio.run(app._handle_press())
+    asyncio.run(app._coordinator.injection_service.apply_inline_interim("你好"))
+
+    composition = app._coordinator.injection_service.get_composition()
+
+    assert commands == ["START"]
+    assert app._coordinator.injection_service.get_current_target() == target
+    assert app._coordinator.injection_service.is_inline_streaming_enabled() is True
+    assert composition is not None
+    assert app.injection_manager.injector.calls == [(target, "", "你好")]
+
+
 def test_send_stop_hides_microphone_hud_before_waiting(monkeypatch: pytest.MonkeyPatch):
     app = _build_app(monkeypatch)
     session = _build_session(14)
@@ -716,6 +842,41 @@ def test_check_foreground_elevation_warns_and_clears(monkeypatch: pytest.MonkeyP
     app._check_foreground_elevation()
 
     assert app._status == "空闲"
+
+
+def test_runtime_send_stop_if_needed_delegates_once(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    runtime_session = _build_runtime_session(30)
+    runtime_session.pending_stop = True
+    app._coordinator.session_manager._session = runtime_session
+    send_stop_calls: list[int] = []
+
+    async def fake_send_stop() -> None:
+        send_stop_calls.append(1)
+        runtime_session.mark_stop_sent()
+
+    monkeypatch.setattr(app._coordinator.session_manager, "send_stop", fake_send_stop)
+
+    asyncio.run(app._coordinator._send_stop_if_needed())
+
+    assert send_stop_calls == [1]
+    assert runtime_session.stop_sent is True
+    assert app.overlay_scheduler.calls == [("stop_microphone", ())]
+    assert app._status == "正在转写…"
+
+
+def test_coordinator_restart_hook_uses_wrapper_compat(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    calls: list[bool] = []
+
+    async def fake_restart() -> None:
+        calls.append(True)
+
+    monkeypatch.setattr(app, "_handle_restart_as_admin", fake_restart)
+
+    asyncio.run(app._coordinator._handle_restart_as_admin())
+
+    assert calls == [True]
 
 
 def test_handle_restart_as_admin_stops_after_success(monkeypatch: pytest.MonkeyPatch):
