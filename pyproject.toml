@@ -1,6 +1,6 @@
 [project]
 name = "doubaoime-asr"
-version = "0.2.3"
+version = "0.2.4"
 description = "豆包输入法 ASR"
 readme = "README.md"
 requires-python = ">=3.11"
