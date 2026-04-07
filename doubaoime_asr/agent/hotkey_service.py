@@ -61,10 +61,12 @@ class HotkeyService:
 
     def stop(self) -> None:
         """停止热键监听。"""
-        if self._hook is not None:
-            self._hook.stop()
-            self._hook = None
-            self._logger.info("热键监听已停止")
+        hook = self._hook
+        if hook is None:
+            return
+        self._hook = None
+        hook.stop()
+        self._logger.info("热键监听已停止")
 
     def on_press(self, callback: Callable[[], None]) -> None:
         """注册热键按下回调。
@@ -91,10 +93,11 @@ class HotkeyService:
         Args:
             vk: 新的虚拟键码。
         """
-        if self._hook is not None and self._vk != vk:
+        hook = self._hook
+        if hook is not None and self._vk != vk:
             old_display = vk_to_display(self._vk)
             new_display = vk_to_display(vk)
-            self._hook.stop()
+            hook.stop()
             self._vk = vk
             self._hook = GlobalHotkeyHook(
                 vk,

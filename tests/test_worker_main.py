@@ -254,3 +254,86 @@ def test_run_single_session_does_not_retry_after_final(monkeypatch):
     assert capture.iter_from_calls == [0]
     assert any(event == "final" for event, _ in emitted)
     assert emitted[-1][0] == "error"
+
+
+def test_run_worker_emits_ready_then_exits(monkeypatch):
+    emitted: list[tuple[str, dict[str, object]]] = []
+
+    class _Thread:
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+    def fake_start_stdin_reader(loop, command_queue, logger):
+        loop.call_soon_threadsafe(command_queue.put_nowait, "EXIT")
+        return _Thread()
+
+    monkeypatch.setattr(worker_main, "_start_stdin_reader", fake_start_stdin_reader)
+    monkeypatch.setattr(worker_main, "_emit_stdout", lambda event_type, **payload: emitted.append((event_type, payload)))
+    monkeypatch.setattr(worker_main, "setup_named_logger", lambda *args, **kwargs: logging.getLogger("worker-main-test"))
+
+    result = asyncio.run(
+        worker_main.run_worker(
+            SimpleNamespace(
+                worker_log_path=None,
+                credential_path=None,
+                mic_device=None,
+            )
+        )
+    )
+
+    assert result == 0
+    assert emitted[0][0] == "worker_ready"
+
+
+def test_run_worker_start_stop_exit_controls_active_capture(monkeypatch):
+    emitted: list[tuple[str, dict[str, object]]] = []
+    captures: list[object] = []
+
+    class _Thread:
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+    class _FakeCapture:
+        def __init__(self, **kwargs) -> None:
+            self.stop_requests = 0
+            captures.append(self)
+
+        def request_stop(self) -> None:
+            self.stop_requests += 1
+
+    async def fake_run_single_session(*, capture, config, logger) -> int:
+        while capture.stop_requests == 0:
+            await asyncio.sleep(0)
+        return 0
+
+    def fake_start_stdin_reader(loop, command_queue, logger):
+        for command in ("START", "STOP", "EXIT"):
+            loop.call_soon_threadsafe(command_queue.put_nowait, command)
+        return _Thread()
+
+    monkeypatch.setattr(worker_main, "BufferedAudioCapture", _FakeCapture)
+    monkeypatch.setattr(worker_main, "_run_single_session", fake_run_single_session)
+    monkeypatch.setattr(worker_main, "_start_stdin_reader", fake_start_stdin_reader)
+    monkeypatch.setattr(worker_main, "_emit_stdout", lambda event_type, **payload: emitted.append((event_type, payload)))
+    monkeypatch.setattr(worker_main, "setup_named_logger", lambda *args, **kwargs: logging.getLogger("worker-main-test"))
+
+    result = asyncio.run(
+        worker_main.run_worker(
+            SimpleNamespace(
+                worker_log_path=None,
+                credential_path=None,
+                mic_device=None,
+            )
+        )
+    )
+
+    assert result == 0
+    assert len(captures) == 1
+    assert captures[0].stop_requests >= 1
+    assert emitted[0][0] == "worker_ready"

@@ -440,7 +440,33 @@ class SessionManager:
             else:
                 with contextlib.suppress(Exception):
                     await wait_task
+        await self._close_process_streams(session.process)
         self._session = None
+
+    async def _close_process_streams(self, process: asyncio.subprocess.Process) -> None:
+        """显式关闭 subprocess pipe，避免 transport 在后续 GC 时泄漏 warning。"""
+        stdin = getattr(process, "stdin", None)
+        if stdin is not None:
+            with contextlib.suppress(Exception):
+                stdin.close()
+            wait_closed = getattr(stdin, "wait_closed", None)
+            if callable(wait_closed):
+                with contextlib.suppress(Exception):
+                    await wait_closed()
+            with contextlib.suppress(Exception):
+                process.stdin = None
+
+        for stream_name in ("stdout", "stderr"):
+            stream = getattr(process, stream_name, None)
+            if stream is None:
+                continue
+            transport = getattr(stream, "_transport", None)
+            close = getattr(transport, "close", None)
+            if callable(close):
+                with contextlib.suppress(Exception):
+                    close()
+            with contextlib.suppress(Exception):
+                setattr(process, stream_name, None)
 
     def stop(self) -> None:
         """标记停止。"""

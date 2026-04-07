@@ -20,7 +20,11 @@ def logger() -> logging.Logger:
 @pytest.fixture
 def hotkey_service(logger: logging.Logger) -> HotkeyService:
     """创建 HotkeyService 实例。"""
-    return HotkeyService(logger)
+    service = HotkeyService(logger)
+    try:
+        yield service
+    finally:
+        service.stop()
 
 
 @pytest.fixture
@@ -153,6 +157,21 @@ class TestHotkeyServiceLifecycle:
         hotkey_service.stop()
 
         mock_instance.stop.assert_called_once()
+
+    def test_stop_clears_hook_before_invoking_underlying_stop(
+        self,
+        hotkey_service: HotkeyService,
+        mock_hook_class: MagicMock,
+    ) -> None:
+        """即使底层 stop 抛错，也不应保留悬挂 hook 引用。"""
+        mock_instance = mock_hook_class.return_value
+        hotkey_service.start(0xA3)
+        mock_instance.stop.side_effect = RuntimeError("stop failed")
+
+        with pytest.raises(RuntimeError, match="stop failed"):
+            hotkey_service.stop()
+
+        assert hotkey_service._hook is None
 
     def test_stop_without_start_is_safe(
         self,

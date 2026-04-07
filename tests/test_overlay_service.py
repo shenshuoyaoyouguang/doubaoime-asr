@@ -121,6 +121,22 @@ class TestOverlayServiceLifecycle:
 
         service.stop()
 
+    def test_install_runtime_components_marks_service_running(
+        self,
+        mock_preview: _MockPreview,
+        logger: logging.Logger,
+        config: AgentConfig,
+    ) -> None:
+        """安装运行时组件后应进入运行态。"""
+        service = OverlayService(logger, config)
+        scheduler = object()
+
+        service.install_runtime_components(mock_preview, scheduler)
+
+        assert service.is_running()
+        assert service._preview is mock_preview
+        assert service._scheduler is scheduler
+
     def test_configure_updates_preview(
         self,
         mock_preview: _MockPreview,

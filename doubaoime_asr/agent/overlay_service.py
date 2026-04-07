@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     pass
@@ -41,14 +41,12 @@ class OverlayService:
             self._logger.warning("overlay_service_already_running")
             return
 
-        self._preview = OverlayPreview(logger=self._logger, config=self._config)
-        self._preview.start()
-        self._scheduler = OverlayRenderScheduler(
-            self._preview,
-            logger=self._logger,
-            fps=self._config.overlay_render_fps,
+        preview = OverlayPreview(logger=self._logger, config=self._config)
+        preview.start()
+        self.install_runtime_components(
+            preview,
+            self._build_scheduler(preview),
         )
-        self._running = True
         self._logger.info("overlay_service_started fps=%d", self._config.overlay_render_fps)
 
     def stop(self) -> None:
@@ -66,6 +64,28 @@ class OverlayService:
                 self._logger.exception("overlay_preview_stop_failed")
             self._preview = None
         self._logger.info("overlay_service_stopped")
+
+    def install_runtime_components(self, preview: OverlayPreview, scheduler: Any) -> None:
+        """安装运行时 overlay 组件，供启动与 facade bootstrap 复用。"""
+        self._preview = preview
+        self._scheduler = scheduler
+        self._running = True
+
+
+    def _build_scheduler(self, preview: OverlayPreview) -> OverlayRenderScheduler:
+        """按当前配置构建 overlay scheduler。"""
+        return OverlayRenderScheduler(
+            preview,
+            logger=self._logger,
+            fps=self._config.overlay_render_fps,
+        )
+
+    def _get_scheduler(self, action: str) -> OverlayRenderScheduler | None:
+        """获取 scheduler；未启动时记录统一 warning。"""
+        if self._scheduler is None:
+            self._logger.warning("overlay_service_not_started %s", action)
+            return None
+        return self._scheduler
 
     def configure(self, config: AgentConfig) -> None:
         """更新配置。
@@ -85,17 +105,17 @@ class OverlayService:
         Args:
             text: 占位文本，默认为"正在聆听…"
         """
-        if self._scheduler is None:
-            self._logger.warning("overlay_service_not_started show_microphone")
+        scheduler = self._get_scheduler("show_microphone")
+        if scheduler is None:
             return
-        await self._scheduler.show_microphone(text)
+        await scheduler.show_microphone(text)
 
     async def stop_microphone(self) -> None:
         """停止麦克风显示状态。"""
-        if self._scheduler is None:
-            self._logger.warning("overlay_service_not_started stop_microphone")
+        scheduler = self._get_scheduler("stop_microphone")
+        if scheduler is None:
             return
-        await self._scheduler.stop_microphone()
+        await scheduler.stop_microphone()
 
     async def hide(self, reason: str = "") -> None:
         """隐藏浮层。
@@ -103,10 +123,10 @@ class OverlayService:
         Args:
             reason: 隐藏原因，用于日志记录
         """
-        if self._scheduler is None:
-            self._logger.warning("overlay_service_not_started hide")
+        scheduler = self._get_scheduler("hide")
+        if scheduler is None:
             return
-        await self._scheduler.hide(reason)
+        await scheduler.hide(reason)
 
     async def submit_interim(self, text: str) -> None:
         """提交中间识别结果。
@@ -114,10 +134,10 @@ class OverlayService:
         Args:
             text: 中间识别文本
         """
-        if self._scheduler is None:
-            self._logger.warning("overlay_service_not_started submit_interim")
+        scheduler = self._get_scheduler("submit_interim")
+        if scheduler is None:
             return
-        await self._scheduler.submit_interim(text)
+        await scheduler.submit_interim(text)
 
     async def submit_final(self, text: str, kind: str = "final_raw") -> None:
         """提交最终识别结果。
@@ -126,10 +146,10 @@ class OverlayService:
             text: 最终识别文本
             kind: 结果类型，默认为"final_raw"
         """
-        if self._scheduler is None:
-            self._logger.warning("overlay_service_not_started submit_final")
+        scheduler = self._get_scheduler("submit_final")
+        if scheduler is None:
             return
-        await self._scheduler.submit_final(text, kind=kind)
+        await scheduler.submit_final(text, kind=kind)
 
     async def update_microphone_level(self, level: float) -> None:
         """更新麦克风音量级别。
@@ -137,10 +157,10 @@ class OverlayService:
         Args:
             level: 音量级别，范围 0.0-1.0
         """
-        if self._scheduler is None:
-            self._logger.warning("overlay_service_not_started update_microphone_level")
+        scheduler = self._get_scheduler("update_microphone_level")
+        if scheduler is None:
             return
-        await self._scheduler.update_microphone_level(level)
+        await scheduler.update_microphone_level(level)
 
     def is_running(self) -> bool:
         """检查服务是否正在运行。

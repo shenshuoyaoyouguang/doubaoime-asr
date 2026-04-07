@@ -11,7 +11,18 @@
 ├── index.md          # 本文件 - 文档总索引
 ├── system-prompt.md  # 系统提示词
 └── workflow/         # 任务文档
-    └── 260330-voice-input-refactor.md  # 语音输入模块重构
+    ├── 260330-voice-input-refactor.md   # 语音输入模块重构
+    ├── 260408-refactor-delivery-progress.md  # 全链路重构阶段性交付进展
+    ├── 260408-project-architecture-baseline.md  # 项目重构全局基线（阶段版）
+    ├── 260408-project-target-architecture.md  # 项目目标架构设计（阶段版）
+    ├── 260408-module-refactor-summary.md  # 模块级重构设计与测试证据汇总（阶段版）
+    ├── 260408-regression-test-report.md  # 全量回归测试报告（阶段版）
+    ├── 260408-architecture-compliance-report.md  # 架构合规校验报告（阶段版）
+    ├── 260408-deployment-rollback-plan.md  # 上线部署与回滚预案（阶段版）
+    ├── 260408-final-delivery-checklist.md  # 最终交付清单（阶段版）
+    ├── 260408-final-acceptance-report.md  # 最终验收报告（阶段版）
+    ├── 260408-final-delivery-package-summary.md  # 最终交付包总览（阶段版）
+    └── 260408-final-delivery-signoff-summary.md  # 最终交付说明 / 签收版摘要（阶段版）
 ```
 
 ---
@@ -21,6 +32,17 @@
 | 文档 | 说明 |
 |------|------|
 | `workflow/260330-voice-input-refactor.md` | 语音输入模块重构计划（6 阶段拆分 Controller）|
+| `workflow/260408-refactor-delivery-progress.md` | 全链路重构当前完成面、验证结果与交付物映射 |
+| `workflow/260408-project-architecture-baseline.md` | 当前原生架构分层、已完成收口与验证基线 |
+| `workflow/260408-project-target-architecture.md` | 目标架构分层、目标原则与剩余差距 |
+| `workflow/260408-module-refactor-summary.md` | 模块级重构设计、收口内容与测试证据汇总 |
+| `workflow/260408-regression-test-report.md` | 当前阶段定向/全量回归结果与验证范围 |
+| `workflow/260408-architecture-compliance-report.md` | 当前重构结果与目标架构原则的合规检查 |
+| `workflow/260408-deployment-rollback-plan.md` | 阶段版上线部署与回滚预案 |
+| `workflow/260408-final-delivery-checklist.md` | 最终交付包应包含的条目与当前勾选状态 |
+| `workflow/260408-final-acceptance-report.md` | 当前阶段的验收结论与后续收口顺序 |
+| `workflow/260408-final-delivery-package-summary.md` | 将最终交付要求与现有文档、代码、验证结果做映射 |
+| `workflow/260408-final-delivery-signoff-summary.md` | 当前阶段的最终交付说明与签收版摘要 |
 
 ---
 

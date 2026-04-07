@@ -106,9 +106,15 @@ class GlobalHotkeyHook:
     def stop(self) -> None:
         if self._thread_id is not None:
             user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
-        if self._thread is not None:
-            self._thread.join(timeout=2)
-            self._thread = None
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=2)
+        self._thread = None
+        self._thread_id = None
+        self._pressed = False
+        self._callback = None
+        self._hook = None
+        self._started.clear()
 
     def _run(self) -> None:
         self._thread_id = kernel32.GetCurrentThreadId()
@@ -176,9 +182,15 @@ class SingleKeyRecorder:
     def stop(self) -> None:
         if self._thread_id is not None:
             user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
-        if self._thread is not None:
-            self._thread.join(timeout=2)
-            self._thread = None
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=2)
+        self._thread = None
+        self._thread_id = None
+        self._callback = None
+        self._hook = None
+        self._captured = False
+        self._started.clear()
 
     def _run(self) -> None:
         self._thread_id = kernel32.GetCurrentThreadId()

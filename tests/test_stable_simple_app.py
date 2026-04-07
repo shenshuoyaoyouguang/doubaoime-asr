@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 import types
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -30,6 +31,7 @@ from doubaoime_asr.agent.session_manager import (
     WorkerSession as RuntimeWorkerSession,
     WorkerSessionState,
 )
+from doubaoime_asr.agent.events import HotkeyPressEvent, WorkerExitEvent
 from doubaoime_asr.agent.text_polisher import PolishResult
 
 
@@ -213,6 +215,153 @@ def test_build_app_binds_session_manager_event_bridge(monkeypatch: pytest.Monkey
     assert app._coordinator.session_manager._on_event is not None
 
 
+def test_state_property_bridges_delegate_to_coordinator(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    config = AgentConfig(mode="recognize")
+
+    app.config = config
+    app.mode = "recognize"
+    app.launch_args = ["--console"]
+    app._stopping = True
+    app._pending_listener_rebind = True
+    app._pending_worker_restart = True
+    app._pending_polisher_warmup = True
+    app._status = "忙碌"
+
+    assert app.config is config
+    assert app.mode == "recognize"
+    assert app.launch_args == ["--console"]
+    assert app._stopping is True
+    assert app._pending_listener_rebind is True
+    assert app._pending_worker_restart is True
+    assert app._pending_polisher_warmup is True
+    assert app._status == "忙碌"
+
+
+def test_session_override_bridge_helpers_delegate_and_preserve_runtime_flow(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    runtime_session = RuntimeWorkerSession(
+        session_id=55,
+        process=SimpleNamespace(returncode=None, stdin=None),
+        state=WorkerSessionState.READY,
+    )
+    wrapped = app._wrap_session(runtime_session)
+
+    assert app._has_test_session_override() is False
+    assert isinstance(wrapped, stable_simple_app._SessionCompatWrapper)
+    assert app._uses_runtime_session_flow(wrapped) is True
+
+    app._session = _build_session(56)
+    assert app._has_test_session_override() is True
+    assert app._uses_runtime_session_flow(wrapped) is False
+
+    app._reset_test_session_override()
+    assert app._has_test_session_override() is False
+
+
+def test_session_setter_syncs_compat_and_runtime_owners(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    compat_session = _build_session(57)
+    runtime_session = RuntimeWorkerSession(
+        session_id=58,
+        process=SimpleNamespace(returncode=None, stdin=None),
+        state=WorkerSessionState.READY,
+    )
+    wrapped = stable_simple_app._SessionCompat.wrap(runtime_session)
+
+    app._session = compat_session
+    assert app._coordinator.session_manager._session is compat_session._real
+
+    app._session = wrapped
+    assert app._coordinator.session_manager._session is runtime_session
+
+
+def test_reset_test_session_override_restores_manager_backed_session_view(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    runtime_session = RuntimeWorkerSession(
+        session_id=59,
+        process=SimpleNamespace(returncode=None, stdin=None),
+        state=WorkerSessionState.READY,
+    )
+
+    app._session = None
+    app._coordinator.session_manager._session = runtime_session
+    app._reset_test_session_override()
+    session_view = app._session
+
+    assert session_view is not None
+    assert isinstance(session_view, stable_simple_app._SessionCompat)
+    assert session_view.session_id == 59
+
+
+def test_compat_singleton_accessors_return_stable_instances(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+
+    assert app.injection_manager is app.injection_manager
+    assert app.preview is app.preview
+    assert app.overlay_scheduler is app.overlay_scheduler
+
+
+def test_restart_worker_and_handle_release_delegate_to_coordinator(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    app._coordinator.session_manager.restart_worker = AsyncMock()
+    app._coordinator._handle_release = AsyncMock()
+
+    asyncio.run(app._restart_worker())
+    asyncio.run(app._handle_release())
+
+    app._coordinator.session_manager.restart_worker.assert_awaited_once()
+    app._coordinator._handle_release.assert_awaited_once()
+
+
+def test_build_listener_wraps_hotkey_service(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    start_calls: list[int] = []
+    stop_calls: list[bool] = []
+
+    monkeypatch.setattr(
+        app._coordinator.hotkey_service,
+        "start",
+        lambda vk: start_calls.append(vk),
+    )
+    monkeypatch.setattr(
+        app._coordinator.hotkey_service,
+        "stop",
+        lambda: stop_calls.append(True),
+    )
+
+    listener = app._build_listener(object(), 0x77)
+    listener.start()
+    listener.stop()
+
+    assert start_calls == [0x77]
+    assert stop_calls == [True]
+
+
+def test_emit_forwards_converted_legacy_event(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    app._coordinator._emit = MagicMock()
+
+    app._emit("press")
+
+    event = app._coordinator._emit.call_args.args[0]
+    assert isinstance(event, HotkeyPressEvent)
+
+
+def test_emit_threadsafe_forwards_converted_legacy_event(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    app._coordinator._emit_threadsafe = MagicMock()
+    loop = object()
+
+    app._emit_threadsafe(loop, "worker_exit", (12, 9))
+
+    emitted_loop, event = app._coordinator._emit_threadsafe.call_args.args
+    assert emitted_loop is loop
+    assert isinstance(event, WorkerExitEvent)
+    assert event.session_id == 12
+    assert event.exit_code == 9
+
+
 def test_handle_worker_exit_ignores_stale_session(monkeypatch: pytest.MonkeyPatch):
     app = _build_app(monkeypatch)
     current_session = _build_session(2)
@@ -266,6 +415,73 @@ def test_select_worker_ready_timeout_seconds_uses_cold_then_warm(monkeypatch: py
     assert app._select_worker_ready_timeout_seconds() == 4.2
     app._coordinator.session_manager._worker_started_once = True
     assert app._select_worker_ready_timeout_seconds() == 1.8
+
+
+def test_read_worker_stdout_unwraps_runtime_session_owner(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    runtime_session = RuntimeWorkerSession(
+        session_id=44,
+        process=SimpleNamespace(returncode=None, stdin=None),
+        state=WorkerSessionState.READY,
+    )
+    wrapped = stable_simple_app._SessionCompat.wrap(runtime_session)
+    received_sessions: list[RuntimeWorkerSession] = []
+
+    async def fake_read_worker_stdout(stream, session):
+        received_sessions.append(session)
+
+    monkeypatch.setattr(
+        app._coordinator.session_manager,
+        "_read_worker_stdout",
+        fake_read_worker_stdout,
+    )
+
+    asyncio.run(app._read_worker_stdout(object(), wrapped))
+
+    assert received_sessions == [runtime_session]
+
+
+def test_apply_pending_listener_rebind_uses_app_rebind_hook(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    app._pending_listener_rebind = True
+    rebind_calls: list[int] = []
+    monkeypatch.setattr(app, "_rebind_listener", lambda hotkey_vk: rebind_calls.append(hotkey_vk))
+
+    app._apply_pending_listener_rebind("listener_rebind_failed")
+
+    assert rebind_calls == [app.config.effective_hotkey_vk()]
+    assert app._pending_listener_rebind is False
+
+
+def test_status_result_bridge_helpers_delegate_to_coordinator(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    result = object()
+    monkeypatch.setattr(app._coordinator, "_activate_capture_output", lambda: "mute")
+    monkeypatch.setattr(app._coordinator, "_release_capture_output", lambda: "restore")
+    monkeypatch.setattr(app._coordinator, "_mode_display_label", lambda mode=None: f"mode:{mode}")
+    monkeypatch.setattr(app._coordinator, "_session_start_status", lambda warning: f"start:{warning}")
+    monkeypatch.setattr(app._coordinator, "_status_for_final_result", lambda current, raw: f"status:{raw}:{current is result}")
+
+    assert app._activate_capture_output() == "mute"
+    assert app._release_capture_output() == "restore"
+    assert app._mode_display_label("inject") == "mode:inject"
+    assert app._session_start_status("warn") == "start:warn"
+    assert app._status_for_final_result(result, "raw-text") == "status:raw-text:True"
+
+
+def test_resolve_final_text_and_polisher_change_delegate(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    old_config = AgentConfig(polish_mode="off")
+    new_config = AgentConfig(polish_mode=POLISH_MODE_OLLAMA)
+
+    async def fake_resolve_final_text(raw_text: str) -> str:
+        return f"resolved:{raw_text}"
+
+    monkeypatch.setattr(app._coordinator, "_resolve_final_text", fake_resolve_final_text)
+    monkeypatch.setattr(app._coordinator, "_polisher_config_changed", lambda old, new: (old, new) == (old_config, new_config))
+
+    assert asyncio.run(app._resolve_final_text("hello")) == "resolved:hello"
+    assert app._polisher_config_changed(old_config, new_config) is True
 
 
 def test_terminate_worker_waits_for_killed_process(monkeypatch: pytest.MonkeyPatch):
@@ -327,6 +543,47 @@ def test_handle_worker_exit_applies_pending_listener_rebind(monkeypatch: pytest.
 
     assert rebind_calls == [app.config.effective_hotkey_vk()]
     assert app._pending_listener_rebind is False
+
+
+def test_apply_config_defers_runtime_mutations_during_active_session(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    old_config = AgentConfig(hotkey="f8", hotkey_vk=0x77, hotkey_display="F8")
+    new_config = AgentConfig(
+        hotkey="f9",
+        hotkey_vk=0x78,
+        hotkey_display="F9",
+        credential_path="new-credentials.json",
+        microphone_device="Mic 2",
+        polish_mode=POLISH_MODE_OLLAMA,
+        ollama_model="qwen3",
+    )
+    app = _build_app(monkeypatch, old_config)
+    session = _build_session(24)
+    session.active = True
+    app._session = session
+
+    rebind_calls: list[int] = []
+    restart_calls: list[bool] = []
+    warmup_calls: list[str] = []
+    monkeypatch.setattr(app, "_rebind_listener", lambda hotkey_vk: rebind_calls.append(hotkey_vk))
+
+    async def fake_restart_worker() -> None:
+        restart_calls.append(True)
+
+    monkeypatch.setattr(app, "_restart_worker", fake_restart_worker)
+    monkeypatch.setattr(app, "_schedule_polisher_warmup", lambda reason: warmup_calls.append(reason))
+    monkeypatch.setattr(AgentConfig, "save", lambda self, path=None: Path("config.json"))
+
+    asyncio.run(app._apply_config(new_config))
+
+    assert rebind_calls == []
+    assert restart_calls == []
+    assert warmup_calls == []
+    assert app._pending_listener_rebind is True
+    assert app._pending_worker_restart is True
+    assert app._pending_polisher_warmup is True
+    assert app.config == new_config
 
 
 def test_apply_config_rolls_back_runtime_changes_after_save_failure(monkeypatch: pytest.MonkeyPatch):
@@ -494,6 +751,23 @@ def test_handle_worker_event_ignores_stale_session_id(monkeypatch: pytest.Monkey
     assert clear_calls == []
     assert app.overlay_scheduler.calls == []
     assert session.active is True
+
+
+def test_handle_worker_event_parses_dict_before_forwarding(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    session = _build_session(23)
+    app._session = session
+    forwarded: list[object] = []
+
+    async def fake_handle_worker_event(event: object) -> None:
+        forwarded.append(event)
+
+    monkeypatch.setattr(app._coordinator, "_handle_worker_event", fake_handle_worker_event)
+
+    asyncio.run(app._handle_worker_event(23, {"type": "ready"}))
+
+    assert len(forwarded) == 1
+    assert getattr(forwarded[0], "event_type", None) == "ready"
 
 
 def test_runtime_inline_callbacks_use_injection_service_session(monkeypatch: pytest.MonkeyPatch):
@@ -938,6 +1212,25 @@ def test_handle_restart_as_admin_stops_after_success(monkeypatch: pytest.MonkeyP
     assert app._stopping is True
     assert app._status == "正在以管理员身份重启…"
 
+
+
+def test_handle_restart_as_admin_returns_when_already_elevated(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(monkeypatch)
+    monkeypatch.setattr(stable_simple_app, "is_current_process_elevated", lambda: True)
+    restart_calls: list[bool] = []
+
+    def fake_restart_as_admin(*args, **kwargs):
+        restart_calls.append(True)
+        return True
+
+    monkeypatch.setattr(stable_simple_app, "restart_as_admin", fake_restart_as_admin)
+
+    asyncio.run(app._handle_restart_as_admin())
+
+    assert restart_calls == []
+    assert app._stopping is False
+    assert app._process_elevated is True
+    assert app._status == "进程已在管理员模式运行"
 
 def test_handle_restart_as_admin_reports_declined(monkeypatch: pytest.MonkeyPatch):
     app = _build_app(monkeypatch)

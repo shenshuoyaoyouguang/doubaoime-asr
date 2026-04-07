@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import dataclass, field
-from enum import Enum, auto
-import json
 from pathlib import Path
 import time
 from typing import AsyncIterator, Callable, List, Optional, Union
@@ -13,118 +10,50 @@ from pydantic import BaseModel, Field
 import websockets
 from websockets import ClientConnection
 
-from .config import ASRConfig, SessionConfig
+from .config import ASRConfig
 from .audio import AudioEncoder
-from .asr_pb2 import AsrRequest, AsrResponse as AsrResponsePb, FrameState
+from .asr_pb2 import FrameState
+from .asr_models import (
+    ASRAlternative,
+    ASRError,
+    ASRExtra,
+    ASRProbeResult,
+    ASRResponse,
+    ASRResult,
+    ASRTransportError,
+    ASRWord,
+    OIDecodingInfo,
+    ResponseType,
+)
+from .asr_protocol import (
+    build_asr_request as _build_asr_request,
+    build_finish_session as _build_finish_session,
+    build_start_session as _build_start_session,
+    build_start_task as _build_start_task,
+    parse_response as _parse_response,
+)
 
 # PCM 音频数据的类型别名
 AudioChunk = bytes
 
-
-class ResponseType(Enum):
-    """
-    ASR 响应类型
-    """
-    TASK_STARTED = auto()
-    SESSION_STARTED = auto()
-    SESSION_FINISHED = auto()
-    VAD_START = auto()
-    INTERIM_RESULT = auto()
-    FINAL_RESULT = auto()
-    HEARTBEAT = auto()
-    ERROR = auto()
-    UNKNOWN = auto()
-
-
-@dataclass
-class ASRWord:
-    """单词级别的识别结果"""
-    word: str
-    start_time: float
-    end_time: float
-
-
-@dataclass
-class OIDecodingInfo:
-    """OI 解码信息"""
-    oi_former_word_num: int = 0
-    oi_latter_word_num: int = 0
-    oi_words: Optional[List] = None
-
-
-@dataclass
-class ASRAlternative:
-    """识别候选结果"""
-    text: str
-    start_time: float
-    end_time: float
-    words: List[ASRWord] = field(default_factory=list)
-    semantic_related_to_prev: Optional[bool] = None
-    oi_decoding_info: Optional[OIDecodingInfo] = None
-
-
-@dataclass
-class ASRResult:
-    """单条识别结果"""
-    text: str
-    start_time: float
-    end_time: float
-    confidence: float = 0.0
-    alternatives: List[ASRAlternative] = field(default_factory=list)
-    is_interim: bool = True
-    is_vad_finished: bool = False
-    index: int = 0
-
-
-@dataclass
-class ASRExtra:
-    """响应附加信息"""
-    audio_duration: Optional[int] = None
-    model_avg_rtf: Optional[float] = None
-    model_send_first_response: Optional[int] = None
-    speech_adaptation_version: Optional[str] = None
-    model_total_process_time: Optional[int] = None
-    packet_number: Optional[int] = None
-    vad_start: Optional[bool] = None
-    req_payload: Optional[dict] = None
-
-
-@dataclass
-class ASRResponse:
-    """
-    ASR 响应
-    """
-    type: ResponseType
-    text: str = ""
-    is_final: bool = False
-    vad_start: bool = False
-    vad_finished: bool = False
-    packet_number: int = -1
-    error_msg: str = ""
-    raw_json: Optional[dict] = None
-    results: List[ASRResult] = field(default_factory=list)
-    extra: Optional[ASRExtra] = None
-
-
-class ASRError(Exception):
-    """
-    ASR 错误
-    """
-    def __init__(self, message: str, response: Optional[ASRResponse] = None) -> None:
-        super().__init__(message)
-        self.response = response
-
-
-class ASRTransportError(ASRError):
-    """可重试的传输层错误。"""
-
-
-@dataclass
-class ASRProbeResult:
-    ok: bool
-    stage: str
-    message: str = ""
-    latency_ms: int = 0
+__all__ = [
+    "AudioChunk",
+    "ResponseType",
+    "ASRWord",
+    "OIDecodingInfo",
+    "ASRAlternative",
+    "ASRResult",
+    "ASRExtra",
+    "ASRResponse",
+    "ASRError",
+    "ASRTransportError",
+    "ASRProbeResult",
+    "DoubaoASR",
+    "probe_asr_session",
+    "transcribe",
+    "transcribe_stream",
+    "transcribe_realtime",
+]
 
 
 class _SessionState(BaseModel):
@@ -568,218 +497,6 @@ async def probe_asr_session(config: ASRConfig) -> ASRProbeResult:
         stage="ok",
         latency_ms=_latency_ms(started_at),
     )
-
-
-    
-def _build_start_task(request_id: str, token: str) -> bytes:
-    """构建 StartTask 消息 pb 数据"""
-    request = AsrRequest()
-    request.token = token
-    request.service_name = "ASR"
-    request.method_name = "StartTask"
-    request.request_id = request_id
-    return request.SerializeToString()
-
-
-def _build_start_session(request_id: str, token: str, config: SessionConfig) -> bytes:
-    """构建 StartSession 消息 pb 数据"""
-    request = AsrRequest()
-    request.token = token
-    request.service_name = "ASR"
-    request.method_name = "StartSession"
-    request.request_id = request_id
-    request.payload = config.model_dump_json()
-    return request.SerializeToString()
-
-
-def _build_finish_session(request_id: str, token: str) -> bytes:
-    """构建 FinishSession 消息 pb 数据"""
-    request = AsrRequest()
-    request.token = token
-    request.service_name = "ASR"
-    request.method_name = "FinishSession"
-    request.request_id = request_id
-    return request.SerializeToString()
-
-
-def _build_asr_request(
-    audio_data: bytes,
-    request_id: str,
-    frame_state: FrameState,
-    timestamp_ms: int,
-) -> bytes:
-    request = AsrRequest()
-    metadata = json.dumps({"extra": {}, "timestamp_ms": timestamp_ms})
-
-    request.service_name = "ASR"
-    request.method_name = "TaskRequest"
-    request.payload = metadata
-    request.audio_data = audio_data
-    request.request_id = request_id
-    request.frame_state = frame_state
-    return request.SerializeToString()
-
-
-
-def _parse_word(data: dict) -> ASRWord:
-    """解析单词数据"""
-    return ASRWord(
-        word=data.get("word", ""),
-        start_time=data.get("start_time", 0.0),
-        end_time=data.get("end_time", 0.0),
-    )
-
-
-def _parse_oi_decoding_info(data: Optional[dict]) -> Optional[OIDecodingInfo]:
-    """解析 OI 解码信息"""
-    if data is None:
-        return None
-    return OIDecodingInfo(
-        oi_former_word_num=data.get("oi_former_word_num", 0),
-        oi_latter_word_num=data.get("oi_latter_word_num", 0),
-        oi_words=data.get("oi_words"),
-    )
-
-
-def _parse_alternative(data: dict) -> ASRAlternative:
-    """解析候选结果"""
-    words = [_parse_word(w) for w in data.get("words", [])]
-    return ASRAlternative(
-        text=data.get("text", ""),
-        start_time=data.get("start_time", 0.0),
-        end_time=data.get("end_time", 0.0),
-        words=words,
-        semantic_related_to_prev=data.get("semantic_related_to_prev"),
-        oi_decoding_info=_parse_oi_decoding_info(data.get("oi_decoding_info")),
-    )
-
-
-def _parse_result(data: dict) -> ASRResult:
-    """解析单条识别结果"""
-    alternatives = [_parse_alternative(a) for a in data.get("alternatives", [])]
-    return ASRResult(
-        text=data.get("text", ""),
-        start_time=data.get("start_time", 0.0),
-        end_time=data.get("end_time", 0.0),
-        confidence=data.get("confidence", 0.0),
-        alternatives=alternatives,
-        is_interim=data.get("is_interim", True),
-        is_vad_finished=data.get("is_vad_finished", False),
-        index=data.get("index", 0),
-    )
-
-
-def _parse_extra(data: dict) -> ASRExtra:
-    """解析附加信息"""
-    return ASRExtra(
-        audio_duration=data.get("audio_duration"),
-        model_avg_rtf=data.get("model_avg_rtf"),
-        model_send_first_response=data.get("model_send_first_response"),
-        speech_adaptation_version=data.get("speech_adaptation_version"),
-        model_total_process_time=data.get("model_total_process_time"),
-        packet_number=data.get("packet_number"),
-        vad_start=data.get("vad_start"),
-        req_payload=data.get("req_payload"),
-    )
-
-
-def _parse_response(data: bytes) -> ASRResponse:
-    """解析 ASR 响应 (使用 protobuf)"""
-    pb = AsrResponsePb()
-    pb.ParseFromString(data)
-
-    message_type = pb.message_type
-    result_json = pb.result_json  # 字段 7: 识别结果 JSON
-    status_message = pb.status_message  # 字段 6: 状态消息
-
-    # 根据 message_type 判断响应类型
-    if message_type == "TaskStarted":
-        return ASRResponse(type=ResponseType.TASK_STARTED)
-
-    if message_type == "SessionStarted":
-        return ASRResponse(type=ResponseType.SESSION_STARTED)
-
-    if message_type == "SessionFinished":
-        return ASRResponse(type=ResponseType.SESSION_FINISHED)
-
-    if message_type in ("TaskFailed", "SessionFailed"):
-        return ASRResponse(type=ResponseType.ERROR, error_msg=status_message)
-
-    # 识别结果在 result_json 字段（字段 7）
-    if not result_json:
-        return ASRResponse(type=ResponseType.UNKNOWN)
-
-    try:
-        json_data = json.loads(result_json)
-    except json.JSONDecodeError:
-        return ASRResponse(type=ResponseType.UNKNOWN)
-
-    results_raw = json_data.get("results")
-    extra_raw = json_data.get("extra", {})
-
-    # 解析为强类型
-    parsed_extra = _parse_extra(extra_raw)
-
-    # 无 results，可能是心跳包
-    if results_raw is None:
-        return ASRResponse(
-            type=ResponseType.HEARTBEAT,
-            packet_number=extra_raw.get("packet_number", -1),
-            raw_json=json_data,
-            extra=parsed_extra,
-        )
-
-    # 解析 results
-    parsed_results = [_parse_result(r) for r in results_raw]
-
-    # VAD 开始
-    if extra_raw.get("vad_start"):
-        return ASRResponse(
-            type=ResponseType.VAD_START,
-            vad_start=True,
-            raw_json=json_data,
-            results=parsed_results,
-            extra=parsed_extra,
-        )
-
-    # 解析识别结果
-    text = ""
-    is_interim = True
-    vad_finished = False
-    nonstream_result = False
-
-    for r in results_raw:
-        if r.get("text"):
-            text = r.get("text")
-        if r.get("is_interim") is False:
-            is_interim = False
-        if r.get("is_vad_finished"):
-            vad_finished = True
-        if r.get("extra", {}).get("nonstream_result"):
-            nonstream_result = True
-
-    # 最终结果
-    if nonstream_result or (not is_interim and vad_finished):
-        return ASRResponse(
-            type=ResponseType.FINAL_RESULT,
-            text=text,
-            is_final=True,
-            vad_finished=vad_finished,
-            raw_json=json_data,
-            results=parsed_results,
-            extra=parsed_extra,
-        )
-
-    # 中间结果
-    return ASRResponse(
-        type=ResponseType.INTERIM_RESULT,
-        text=text,
-        is_final=False,
-        raw_json=json_data,
-        results=parsed_results,
-        extra=parsed_extra,
-    )
-
 
 # =============
 # 便捷函数

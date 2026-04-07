@@ -17,3 +17,20 @@
 - Windows 上跑 `tests/test_stable_simple_app.py` / `tests/test_coordinator.py` 相关用例时，当前仓库可能出现 `PytestUnraisableExceptionWarning`，栈里是 `BaseSubprocessTransport.__del__` / `Event loop is closed`。
   - 这看起来是已有的 asyncio subprocess 清理时序问题，不是本轮 interim dispatcher / inline profile 改动直接引入的失败。
   - 如果后续有人继续清理这块，请优先排查 `SessionManager`/worker 相关测试 double 关闭 transport 或在 loop 关闭后析构 subprocess pipe 的路径。
+- 全量 `pytest -q` 的 warning 数并不稳定；在 2026-04-07 的一次 Batch 1 重构后，新增测试会把同一类历史问题放大成 **2 条** warning，集中在 `tests/test_hotkey_service.py::TestHotkeyServiceUpdateHotkey::test_update_hotkey_while_running`。
+  - 两条 warning 分别来自 `_ProactorBasePipeTransport.__del__` 和 `BaseSubprocessTransport.__del__`，都指向已关闭 pipe 的 `fileno()` / transport `__repr__`。
+  - 这更像是既有 hotkey/asyncio 子进程测试清理问题被不同测试排序触发，而不是 ASR / settings / transcript 拆分直接引入的新业务回归。
+- 2026-04-08 进一步定位后确认：`tests/test_coordinator.py::TestCoordinatorConfigChanges::test_apply_config_invalidates_preflight_on_credential_path_change` 之前没有 mock `session_manager.restart_worker()`，会在单测里**真的拉起 worker subprocess**。
+  - 该 subprocess 泄漏是全量 `pytest -q` 剩余 `BaseSubprocessTransport.__del__` warning 的直接来源之一。
+  - 修复方式：在该测试中显式 `coordinator.session_manager.restart_worker = AsyncMock()`，把它固定成纯单测。
+  - 修复后全量回归恢复为 **433 passed, 0 warnings**。
+- 2026-04-07 针对 `hotkey_service.py` / `win_keyboard_hook.py` 做过一次专门侧线排查：
+  - `pytest tests/test_hotkey_service.py -q`：**0 warning**
+  - `pytest tests/test_worker_main.py tests/test_hotkey_service.py -q`：**0 warning**
+  - `pytest tests/test_session_manager.py tests/test_stable_simple_app.py tests/test_hotkey_service.py -q`：**0 warning**
+  - 但 `pytest -q` 仍可能保留 **1 条** `BaseSubprocessTransport.__del__` warning，并归因到 `tests/test_hotkey_service.py::TestHotkeyServiceLifecycle::test_stop_clears_hook` 的收尾时机。
+  - 这说明 **warning 的触发点在 hotkey 测试文件，根因大概率不在 hotkey 写集本身**；更像是别处泄漏的 asyncio subprocess transport 在该文件执行期间才被 GC/析构。
+  - 后续若要继续清零 warning，优先排查 `session_manager` / `stable_simple_app` / 其他 subprocess-heavy 路径，而不是继续深挖 `hotkey_service`。
+- 当前 OMX 团队并行能力在这台机器上还有一个环境约束：
+  - 直接调用 `omx_run_team_start` 可能失败并报 `Team mode requires running inside tmux current leader pane`。
+  - 如果后续代理要继续走 team/多子代理并行，请优先确认当前会话运行在 tmux leader pane；否则改用主线程直做 + 轻量只读侧线分析，避免把环境限制误判成代码阻塞。

@@ -6,6 +6,8 @@ Coordinator 测试。
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import gc
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -45,7 +47,24 @@ def coordinator(config: AgentConfig) -> VoiceInputCoordinator:
             enable_tray=False,
             console=False,
         )
-    return coord
+    try:
+        yield coord
+    finally:
+        coord.stop()
+        coord.hotkey_service.stop()
+        coord.overlay_service.stop()
+        if coord._settings_controller is not None:
+            with contextlib.suppress(Exception):
+                coord._settings_controller.close()
+        with contextlib.suppress(Exception):
+            asyncio.run(coord._close_interim_dispatcher())
+        with contextlib.suppress(Exception):
+            asyncio.run(coord._cancel_polisher_warmup())
+        with contextlib.suppress(Exception):
+            asyncio.run(coord._cancel_foreground_watch())
+        with contextlib.suppress(Exception):
+            asyncio.run(coord.session_manager.terminate_worker())
+        gc.collect()
 
 
 class TestCoordinatorInit:
@@ -462,6 +481,7 @@ class TestCoordinatorConfigChanges:
     ) -> None:
         coordinator._asr_preflight.invalidate = MagicMock()
         coordinator.hotkey_service.update_hotkey = MagicMock()
+        coordinator.session_manager.restart_worker = AsyncMock()
         coordinator.overlay_service.configure = MagicMock()
         coordinator.injection_service.configure = MagicMock()
         coordinator.text_polisher.configure = MagicMock()
@@ -471,6 +491,7 @@ class TestCoordinatorConfigChanges:
         await coordinator._apply_config(AgentConfig(credential_path="other.json"))
 
         coordinator._asr_preflight.invalidate.assert_called_once()
+        coordinator.session_manager.restart_worker.assert_awaited_once()
 
 
 class TestCoordinatorPreflight:

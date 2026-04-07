@@ -31,6 +31,7 @@ from .config import (
     SUPPORTED_POLISH_MODES,
     SUPPORTED_STREAMING_TEXT_MODES,
 )
+from .config_update_plan import build_config_update_plan, polisher_config_changed
 from .events import (
     AudioLevelEvent,
     ConfigChangeEvent,
@@ -60,6 +61,7 @@ from .overlay_service import OverlayService
 from .runtime_logging import setup_named_logger
 from .session_manager import Mode, SessionManager, WorkerSession, WorkerSessionState
 from .text_polisher import PolishResult, TextPolisher
+from .transcript_utils import TranscriptAccumulator, concat_transcript_text
 from .win_audio_output import AudioOutputMuteError, SystemOutputMuteGuard
 from .win_hotkey import normalize_hotkey, vk_from_hotkey, vk_to_display, vk_to_hotkey
 from .win_privileges import is_current_process_elevated, restart_as_admin
@@ -122,6 +124,7 @@ class VoiceInputCoordinator:
         self._foreground_watch_task: asyncio.Task[None] | None = None
         self._preview_lock = threading.Lock()
         self._preview_counter = 0
+        self._transcript = TranscriptAccumulator()
 
         # 初始化 Services
         self.session_manager = SessionManager(
@@ -149,14 +152,42 @@ class VoiceInputCoordinator:
         self._tray_icon = None
         self._tray_thread: threading.Thread | None = None
 
-        # 会话状态（保留部分未迁移的状态）
-        self._segment_texts: dict[int, str] = {}
-        self._finalized_segment_indexes: set[int] = set()
-        self._active_segment_index: int | None = None
-        self._last_displayed_raw_final_text: str = ""
+        # 会话状态（由 _transcript 持有，兼容属性暴露旧访问路径）
         self._finished_event_started_at: float | None = None
         self._interim_dispatcher: DebouncedInterimDispatcher | None = None
         self._last_interim_flush_seq = 0
+
+    @property
+    def _segment_texts(self) -> dict[int, str]:
+        return self._transcript.segment_texts
+
+    @_segment_texts.setter
+    def _segment_texts(self, value: dict[int, str]) -> None:
+        self._transcript.segment_texts = value
+
+    @property
+    def _finalized_segment_indexes(self) -> set[int]:
+        return self._transcript.finalized_segment_indexes
+
+    @_finalized_segment_indexes.setter
+    def _finalized_segment_indexes(self, value: set[int]) -> None:
+        self._transcript.finalized_segment_indexes = value
+
+    @property
+    def _active_segment_index(self) -> int | None:
+        return self._transcript.active_segment_index
+
+    @_active_segment_index.setter
+    def _active_segment_index(self, value: int | None) -> None:
+        self._transcript.active_segment_index = value
+
+    @property
+    def _last_displayed_raw_final_text(self) -> str:
+        return self._transcript.last_displayed_raw_final_text
+
+    @_last_displayed_raw_final_text.setter
+    def _last_displayed_raw_final_text(self, value: str) -> None:
+        self._transcript.last_displayed_raw_final_text = value
 
     # ===== 状态管理 =====
 
@@ -367,10 +398,7 @@ class VoiceInputCoordinator:
         self.set_status(self._session_start_status(capture_output_warning))
 
         # 清除分段文本状态
-        self._segment_texts.clear()
-        self._finalized_segment_indexes.clear()
-        self._active_segment_index = None
-        self._last_displayed_raw_final_text = ""
+        self._transcript.reset()
 
     async def _handle_release(self) -> None:
         """处理热键释放。"""
@@ -603,37 +631,26 @@ class VoiceInputCoordinator:
         is_final: bool,
     ) -> str:
         """记录分段文本。"""
-        index = self._resolve_segment_index(event, is_final=is_final)
-        self._segment_texts[index] = text
-        return self._aggregate_session_text()
+        return self._transcript.record_text(
+            text,
+            segment_index=getattr(event, "segment_index", None),
+            is_final=is_final,
+        )
 
     def _resolve_segment_index(self, event: VoiceInputEvent, *, is_final: bool) -> int:
         """解析分段索引。"""
-        segment_index = getattr(event, "segment_index", None)
-        if segment_index is None:
-            segment_index = self._active_segment_index if self._active_segment_index is not None else self._next_segment_index()
-        if is_final:
-            self._finalized_segment_indexes.add(segment_index)
-            if self._active_segment_index == segment_index:
-                self._active_segment_index = None
-        else:
-            self._active_segment_index = segment_index
-        return segment_index
+        return self._transcript.resolve_segment_index(
+            getattr(event, "segment_index", None),
+            is_final=is_final,
+        )
 
     def _next_segment_index(self) -> int:
         """获取下一个分段索引。"""
-        if not self._segment_texts:
-            return 0
-        return max(self._segment_texts) + 1
+        return self._transcript.next_segment_index()
 
     def _aggregate_session_text(self) -> str:
         """聚合分段文本。"""
-        text = ""
-        for _, segment in sorted(self._segment_texts.items()):
-            if not segment:
-                continue
-            text = self._concat_transcript_text(text, segment)
-        return text
+        return self._transcript.aggregate_text()
 
     async def _submit_interim_snapshot(self, text: str) -> int:
         dispatcher = self._ensure_interim_dispatcher()
@@ -692,28 +709,7 @@ class VoiceInputCoordinator:
 
     def _concat_transcript_text(self, current: str, incoming: str) -> str:
         """拼接文本，处理重叠。"""
-        if not current:
-            return incoming
-        if not incoming:
-            return current
-        if incoming.startswith(current):
-            return incoming
-        if current.endswith(incoming):
-            return current
-        overlap = self._suffix_prefix_overlap(current, incoming)
-        if overlap > 0:
-            return current + incoming[overlap:]
-        if current[-1].isascii() and current[-1].isalnum() and incoming[0].isascii() and incoming[0].isalnum():
-            return f"{current} {incoming}"
-        return current + incoming
-
-    def _suffix_prefix_overlap(self, left: str, right: str) -> int:
-        """计算后缀前缀重叠。"""
-        max_overlap = min(len(left), len(right))
-        for size in range(max_overlap, 0, -1):
-            if left[-size:] == right[:size]:
-                return size
-        return 0
+        return concat_transcript_text(current, incoming)
 
     # ===== Worker 退出处理 =====
 
@@ -801,12 +797,10 @@ class VoiceInputCoordinator:
         old_pending_worker_restart = self._pending_worker_restart
         old_pending_polisher_warmup = self._pending_polisher_warmup
 
-        hotkey_changed = old_config.effective_hotkey_vk() != new_config.effective_hotkey_vk()
-        worker_changed = (
-            old_config.credential_path != new_config.credential_path
-            or old_config.microphone_device != new_config.microphone_device
-        )
-        polisher_changed = self._polisher_config_changed(old_config, new_config)
+        update_plan = build_config_update_plan(old_config, new_config)
+        hotkey_changed = update_plan.hotkey_changed
+        worker_changed = update_plan.worker_changed
+        polisher_changed = update_plan.polisher_changed
         session_active = self.session_manager.is_streaming()
         listener_rebound = False
         worker_restarted = False
@@ -883,17 +877,7 @@ class VoiceInputCoordinator:
 
     def _polisher_config_changed(self, old_config: AgentConfig, new_config: AgentConfig) -> bool:
         """检查润色配置是否变化。"""
-        return any(
-            (
-                old_config.polish_mode != new_config.polish_mode,
-                old_config.ollama_base_url != new_config.ollama_base_url,
-                old_config.ollama_model != new_config.ollama_model,
-                old_config.polish_timeout_ms != new_config.polish_timeout_ms,
-                old_config.ollama_warmup_enabled != new_config.ollama_warmup_enabled,
-                old_config.ollama_keep_alive != new_config.ollama_keep_alive,
-                old_config.ollama_prompt_template != new_config.ollama_prompt_template,
-            )
-        )
+        return polisher_config_changed(old_config, new_config)
 
     # ===== 管理员权限处理 =====
 

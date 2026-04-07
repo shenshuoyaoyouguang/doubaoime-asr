@@ -604,6 +604,48 @@ class TestSessionManagerInternalMethods:
         assert session.stderr_task.cancelled() or session.stderr_task.done()
 
     @pytest.mark.asyncio
+    async def test_dispose_worker_closes_process_streams(self):
+        """测试 _dispose_worker 显式关闭 subprocess pipe。"""
+        manager = SessionManager(_make_config(), _make_logger())
+
+        class _FakeWriter:
+            def __init__(self) -> None:
+                self.close_called = 0
+                self.wait_closed_called = 0
+
+            def close(self) -> None:
+                self.close_called += 1
+
+            async def wait_closed(self) -> None:
+                self.wait_closed_called += 1
+
+        class _FakeTransport:
+            def __init__(self) -> None:
+                self.close_called = 0
+
+            def close(self) -> None:
+                self.close_called += 1
+
+        writer = _FakeWriter()
+        stdout_transport = _FakeTransport()
+        stderr_transport = _FakeTransport()
+        process = _FakeProcess()
+        process.stdin = writer
+        process.stdout = SimpleNamespace(_transport=stdout_transport)
+        process.stderr = SimpleNamespace(_transport=stderr_transport)
+
+        session = WorkerSession(session_id=1, process=process)
+        manager._session = session
+
+        await manager._dispose_worker()
+
+        assert writer.close_called == 1
+        assert writer.wait_closed_called == 1
+        assert stdout_transport.close_called == 1
+        assert stderr_transport.close_called == 1
+        assert manager._session is None
+
+    @pytest.mark.asyncio
     async def test_read_worker_stderr(self):
         """测试读取 stderr。"""
         from unittest.mock import AsyncMock, MagicMock
