@@ -5,6 +5,7 @@ from doubaoime_asr.agent.config import (
     AgentConfig,
     CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT,
     CURRENT_CONFIG_VERSION,
+    FINAL_COMMIT_SOURCE_RAW,
     INJECTION_POLICY_DIRECT_THEN_CLIPBOARD,
     POLISH_MODE_OLLAMA,
     STREAMING_TEXT_MODE_OVERLAY_ONLY,
@@ -23,6 +24,7 @@ def test_agent_config_roundtrip(tmp_path: Path):
         credential_path=str(tmp_path / "credentials.json"),
         injection_policy=INJECTION_POLICY_DIRECT_THEN_CLIPBOARD,
         streaming_text_mode=STREAMING_TEXT_MODE_OVERLAY_ONLY,
+        final_commit_source=FINAL_COMMIT_SOURCE_RAW,
         capture_output_policy=CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT,
         render_debounce_ms=120,
         polish_mode=POLISH_MODE_OLLAMA,
@@ -38,6 +40,10 @@ def test_agent_config_roundtrip(tmp_path: Path):
         overlay_opacity_percent=88,
         overlay_bottom_offset=144,
         overlay_animation_ms=180,
+        worker_ready_timeout_ms=2100,
+        worker_cold_ready_timeout_ms=4200,
+        worker_exit_grace_timeout_ms=1700,
+        worker_kill_wait_timeout_ms=900,
     )
 
     config.save(path)
@@ -60,6 +66,7 @@ def test_agent_config_creates_default_file(tmp_path: Path, monkeypatch):
     assert loaded.overlay_render_fps == 60
     assert loaded.overlay_animation_ms == 80
     assert loaded.streaming_text_mode == "safe_inline"
+    assert loaded.final_commit_source == "polished"
 
 
 def test_discover_preferred_credential_path_prefers_cwd(tmp_path: Path, monkeypatch):
@@ -179,6 +186,15 @@ def test_agent_config_load_sanitizes_streaming_text_mode(tmp_path: Path):
     assert loaded.streaming_text_mode == "safe_inline"
 
 
+def test_agent_config_load_sanitizes_final_commit_source(tmp_path: Path):
+    path = tmp_path / "config.json"
+    path.write_text('{"final_commit_source":"invalid"}', encoding="utf-8")
+
+    loaded = AgentConfig.load(path)
+
+    assert loaded.final_commit_source == "polished"
+
+
 def test_agent_config_load_sanitizes_capture_output_policy(tmp_path: Path):
     path = tmp_path / "config.json"
     path.write_text(
@@ -189,3 +205,18 @@ def test_agent_config_load_sanitizes_capture_output_policy(tmp_path: Path):
     loaded = AgentConfig.load(path)
 
     assert loaded.capture_output_policy == "off"
+
+
+def test_agent_config_load_sanitizes_worker_timeouts(tmp_path: Path):
+    path = tmp_path / "config.json"
+    path.write_text(
+        '{"worker_ready_timeout_ms":"10","worker_cold_ready_timeout_ms":"20","worker_exit_grace_timeout_ms":"999999","worker_kill_wait_timeout_ms":"-1"}',
+        encoding="utf-8",
+    )
+
+    loaded = AgentConfig.load(path)
+
+    assert loaded.worker_ready_timeout_ms == 500
+    assert loaded.worker_cold_ready_timeout_ms == 1000
+    assert loaded.worker_exit_grace_timeout_ms == 10000
+    assert loaded.worker_kill_wait_timeout_ms == 200

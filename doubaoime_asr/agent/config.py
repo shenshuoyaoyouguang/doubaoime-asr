@@ -22,6 +22,12 @@ SUPPORTED_STREAMING_TEXT_MODES = (
     STREAMING_TEXT_MODE_SAFE_INLINE,
     STREAMING_TEXT_MODE_OVERLAY_ONLY,
 )
+FINAL_COMMIT_SOURCE_RAW = "raw"
+FINAL_COMMIT_SOURCE_POLISHED = "polished"
+SUPPORTED_FINAL_COMMIT_SOURCES = (
+    FINAL_COMMIT_SOURCE_RAW,
+    FINAL_COMMIT_SOURCE_POLISHED,
+)
 POLISH_MODE_OFF = "off"
 POLISH_MODE_LIGHT = "light"
 POLISH_MODE_OLLAMA = "ollama"
@@ -102,6 +108,7 @@ class AgentConfig:
     credential_path: str | None = None
     injection_policy: str = INJECTION_POLICY_DIRECT_THEN_CLIPBOARD
     streaming_text_mode: str = STREAMING_TEXT_MODE_SAFE_INLINE
+    final_commit_source: str = FINAL_COMMIT_SOURCE_POLISHED
     capture_output_policy: str = CAPTURE_OUTPUT_POLICY_OFF
     render_debounce_ms: int = 80
     overlay_render_fps: int = 60
@@ -110,6 +117,10 @@ class AgentConfig:
     overlay_opacity_percent: int = 92
     overlay_bottom_offset: int = 120
     overlay_animation_ms: int = 80
+    worker_ready_timeout_ms: int = 2500
+    worker_cold_ready_timeout_ms: int = 5000
+    worker_exit_grace_timeout_ms: int = 2000
+    worker_kill_wait_timeout_ms: int = 2000
     polish_mode: str = POLISH_MODE_LIGHT
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
     ollama_model: str = DEFAULT_OLLAMA_MODEL
@@ -206,6 +217,11 @@ class AgentConfig:
             if data.get("streaming_text_mode") in SUPPORTED_STREAMING_TEXT_MODES
             else base.streaming_text_mode
         )
+        data["final_commit_source"] = (
+            data.get("final_commit_source")
+            if data.get("final_commit_source") in SUPPORTED_FINAL_COMMIT_SOURCES
+            else base.final_commit_source
+        )
         data["capture_output_policy"] = (
             data.get("capture_output_policy")
             if data.get("capture_output_policy") in SUPPORTED_CAPTURE_OUTPUT_POLICIES
@@ -237,6 +253,34 @@ class AgentConfig:
             base.overlay_animation_ms,
             0,
             600,
+        )
+        data["worker_ready_timeout_ms"] = _clamp_int(
+            data.get("worker_ready_timeout_ms"),
+            base.worker_ready_timeout_ms,
+            500,
+            15000,
+        )
+        data["worker_cold_ready_timeout_ms"] = _clamp_int(
+            data.get("worker_cold_ready_timeout_ms"),
+            base.worker_cold_ready_timeout_ms,
+            1000,
+            30000,
+        )
+        data["worker_cold_ready_timeout_ms"] = max(
+            data["worker_cold_ready_timeout_ms"],
+            data["worker_ready_timeout_ms"],
+        )
+        data["worker_exit_grace_timeout_ms"] = _clamp_int(
+            data.get("worker_exit_grace_timeout_ms"),
+            base.worker_exit_grace_timeout_ms,
+            200,
+            10000,
+        )
+        data["worker_kill_wait_timeout_ms"] = _clamp_int(
+            data.get("worker_kill_wait_timeout_ms"),
+            base.worker_kill_wait_timeout_ms,
+            200,
+            10000,
         )
         data["ollama_base_url"] = _sanitize_non_empty_text(
             data.get("ollama_base_url"),
@@ -301,6 +345,20 @@ class AgentConfig:
         if self.hotkey_vk is not None:
             return vk_to_display(int(self.hotkey_vk))
         return vk_to_display(vk_from_hotkey(self.hotkey))
+
+    def worker_ready_timeout_seconds(self, *, cold_start: bool = False) -> float:
+        timeout_ms = (
+            self.worker_cold_ready_timeout_ms
+            if cold_start
+            else self.worker_ready_timeout_ms
+        )
+        return timeout_ms / 1000.0
+
+    def worker_exit_grace_timeout_seconds(self) -> float:
+        return self.worker_exit_grace_timeout_ms / 1000.0
+
+    def worker_kill_wait_timeout_seconds(self) -> float:
+        return self.worker_kill_wait_timeout_ms / 1000.0
 
 
 def _sanitize_hotkey(value: Any, fallback: str) -> str:

@@ -781,6 +781,9 @@ class StableVoiceInputApp:
         if process is None:
             return
 
+        grace_timeout_s = self.config.worker_exit_grace_timeout_seconds()
+        kill_wait_timeout_s = self.config.worker_kill_wait_timeout_seconds()
+
         # 尝试优雅退出
         if getattr(process, "stdin", None) is not None and getattr(process, "returncode", 1) is None:
             try:
@@ -790,20 +793,26 @@ class StableVoiceInputApp:
 
         # 等待进程退出，超时后强制 kill
         try:
-            await asyncio.wait_for(process.wait(), timeout=2)
+            await asyncio.wait_for(process.wait(), timeout=grace_timeout_s)
         except (asyncio.TimeoutError, ProcessLookupError):
             try:
                 process.kill()
             except ProcessLookupError:
                 pass
             try:
-                await asyncio.wait_for(process.wait(), timeout=2)
+                await asyncio.wait_for(process.wait(), timeout=kill_wait_timeout_s)
             except (asyncio.TimeoutError, ProcessLookupError):
                 pass
 
         # 清除会话
         self._coordinator.session_manager._session = None
         self.__test_session = _UNSET
+
+    def _select_worker_ready_timeout_seconds(self) -> float:
+        sm = self._coordinator.session_manager
+        return self.config.worker_ready_timeout_seconds(
+            cold_start=not sm._worker_started_once,
+        )
 
     async def _ensure_worker(self) -> Any:
         """确保 Worker（向后兼容）。
@@ -847,12 +856,14 @@ class StableVoiceInputApp:
         )
         sm._session = session
 
-        # 等待进程就绪（最多 2.5 秒）
+        # 等待进程就绪（冷/热启动超时可配置）
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + 2.5
+        timeout_s = self._select_worker_ready_timeout_seconds()
+        deadline = loop.time() + timeout_s
         while loop.time() < deadline:
             if session.process_ready:
                 session.transition_to(WorkerSessionState.READY)
+                sm._worker_started_once = True
                 return _SessionCompat.wrap(session)
             if session.process.returncode is not None:
                 break

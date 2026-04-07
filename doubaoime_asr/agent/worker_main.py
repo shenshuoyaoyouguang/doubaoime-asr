@@ -15,7 +15,7 @@ import threading
 import time
 from typing import AsyncIterator
 
-from doubaoime_asr.asr import ResponseType, transcribe_realtime
+from doubaoime_asr.asr import ASRTransportError, ResponseType, transcribe_realtime
 from doubaoime_asr.config import ASRConfig
 
 from .config import AgentConfig
@@ -24,6 +24,8 @@ from .runtime_logging import setup_named_logger
 
 LOW_LATENCY_PREBUFFER_MIN_FRAMES = 1
 LOW_LATENCY_PREBUFFER_TIMEOUT_S = 0.18
+MAX_SESSION_ATTEMPTS = 2
+SESSION_RETRY_BACKOFF_S = 0.25
 
 
 def _configure_stdio_utf8() -> None:
@@ -98,8 +100,8 @@ class BufferedAudioCapture:
         self.closed_event = asyncio.Event()
         self.first_chunk_event = asyncio.Event()
         self.stop_event = asyncio.Event()
-
-        self._queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self._history: list[bytes] = []
+        self._history_updated = asyncio.Event()
         self._startup_error: Exception | None = None
         self._task: asyncio.Task[None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -132,21 +134,38 @@ class BufferedAudioCapture:
         self.stop_event.set()
 
     async def iter_chunks(self) -> AsyncIterator[bytes]:
+        async for data in self.iter_chunks_from(0):
+            yield data
+
+    async def iter_chunks_from(self, start_index: int = 0) -> AsyncIterator[bytes]:
+        index = max(0, start_index)
         while True:
             if self._startup_error is not None:
                 raise self._startup_error
-            if self.stop_event.is_set() and self._queue.empty():
+            while index < len(self._history):
+                data = self._history[index]
+                index += 1
+                yield data
+            if self.closed_event.is_set():
                 break
             try:
-                data = await asyncio.wait_for(self._queue.get(), timeout=0.05)
+                await asyncio.wait_for(self._history_updated.wait(), timeout=0.05)
             except asyncio.TimeoutError:
                 continue
-            yield data
+            self._history_updated.clear()
 
     async def wait_closed(self) -> None:
         await self.closed_event.wait()
         if self._task is not None:
             await self._task
+
+    def _record_chunk(self, data: bytes) -> None:
+        self.chunk_count += 1
+        self.bytes_captured += len(data)
+        self._history.append(data)
+        self._history_updated.set()
+        if not self.first_chunk_event.is_set():
+            self.first_chunk_event.set()
 
     def _emit_audio_level(self, frame_bytes: bytes) -> None:
         if self._loop is None:
@@ -179,11 +198,7 @@ class BufferedAudioCapture:
                     functools.partial(_emit_stdout, "status", message=f"[Mic] 状态: {status}")
                 )
             data = indata.tobytes()
-            self.chunk_count += 1
-            self.bytes_captured += len(data)
-            if not self.first_chunk_event.is_set():
-                self._loop.call_soon_threadsafe(self.first_chunk_event.set)
-            self._loop.call_soon_threadsafe(self._queue.put_nowait, data)
+            self._loop.call_soon_threadsafe(self._record_chunk, data)
             self._emit_audio_level(data)
 
         try:
@@ -286,31 +301,58 @@ async def _run_single_session(
             return 0
 
         _emit_stdout("streaming_started", chunks=capture.chunk_count, bytes=capture.bytes_captured)
+        attempt = 1
+        while attempt <= MAX_SESSION_ATTEMPTS:
+            saw_final = False
+            try:
+                async for response in transcribe_realtime(
+                    capture.iter_chunks_from(0),
+                    config=config,
+                ):
+                    logger.info("response=%s text=%s", response.type.name, response.text)
+                    if response.type == ResponseType.TASK_STARTED:
+                        _emit_stdout("status", message="任务已启动")
+                    elif response.type == ResponseType.SESSION_STARTED:
+                        _emit_stdout("status", message="会话已启动，开始说话…")
+                    elif response.type == ResponseType.INTERIM_RESULT and response.text:
+                        _emit_stdout(
+                            "interim",
+                            text=response.text,
+                            segment_index=_response_segment_index(response),
+                        )
+                    elif response.type == ResponseType.FINAL_RESULT:
+                        saw_final = True
+                        _emit_stdout(
+                            "final",
+                            text=response.text,
+                            segment_index=_response_segment_index(response),
+                        )
+                    elif response.type == ResponseType.ERROR:
+                        _emit_stdout("error", message=response.error_msg or "语音识别失败")
+                        return 3
 
-        async for response in transcribe_realtime(capture.iter_chunks(), config=config):
-            logger.info("response=%s text=%s", response.type.name, response.text)
-            if response.type == ResponseType.TASK_STARTED:
-                _emit_stdout("status", message="任务已启动")
-            elif response.type == ResponseType.SESSION_STARTED:
-                _emit_stdout("status", message="会话已启动，开始说话…")
-            elif response.type == ResponseType.INTERIM_RESULT and response.text:
-                _emit_stdout(
-                    "interim",
-                    text=response.text,
-                    segment_index=_response_segment_index(response),
-                )
-            elif response.type == ResponseType.FINAL_RESULT:
-                _emit_stdout(
-                    "final",
-                    text=response.text,
-                    segment_index=_response_segment_index(response),
-                )
-            elif response.type == ResponseType.ERROR:
-                _emit_stdout("error", message=response.error_msg or "语音识别失败")
-                return 3
+                _emit_stdout("finished")
+                return 0
+            except ASRTransportError as exc:
+                if saw_final or attempt >= MAX_SESSION_ATTEMPTS:
+                    logger.warning(
+                        "worker_session_transport_failed attempt=%s saw_final=%s error=%s",
+                        attempt,
+                        saw_final,
+                        exc,
+                    )
+                    _emit_stdout("error", message=str(exc) or exc.__class__.__name__)
+                    return 4
 
-        _emit_stdout("finished")
-        return 0
+                logger.warning("worker_session_retry attempt=%s error=%s", attempt, exc)
+                _emit_stdout(
+                    "status",
+                    message=f"连接中断，正在重试({attempt}/{MAX_SESSION_ATTEMPTS})…",
+                )
+                await asyncio.sleep(SESSION_RETRY_BACKOFF_S * attempt)
+                attempt += 1
+        _emit_stdout("error", message="语音识别重试耗尽")
+        return 4
     except Exception as exc:
         logger.exception("worker_session_failed")
         _emit_stdout("error", message=str(exc) or exc.__class__.__name__)

@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from doubaoime_asr.agent.config import AgentConfig
+from doubaoime_asr.agent.config import AgentConfig, FINAL_COMMIT_SOURCE_RAW
 from doubaoime_asr.agent.coordinator import VoiceInputCoordinator
 from doubaoime_asr.agent.events import (
     HotkeyPressEvent,
@@ -157,6 +157,7 @@ class TestCoordinatorEventHandling:
         self, coordinator: VoiceInputCoordinator
     ) -> None:
         """验证中间结果事件处理。"""
+        coordinator.config.render_debounce_ms = 0
         coordinator.overlay_service.submit_interim = AsyncMock()
         coordinator.injection_service.apply_inline_interim = AsyncMock()
 
@@ -168,6 +169,28 @@ class TestCoordinatorEventHandling:
         await coordinator._handle_worker_event(event)
 
         coordinator.overlay_service.submit_interim.assert_called_once_with("你好")
+        coordinator.injection_service.apply_inline_interim.assert_awaited_once_with("你好")
+
+    @pytest.mark.asyncio
+    async def test_handle_interim_event_coalesces_with_debounce(
+        self, coordinator: VoiceInputCoordinator
+    ) -> None:
+        """验证 interim 防抖后只刷最新 snapshot。"""
+        coordinator.config.render_debounce_ms = 20
+        coordinator.overlay_service.submit_interim = AsyncMock()
+        coordinator.injection_service.apply_inline_interim = AsyncMock()
+
+        mock_session = MagicMock()
+        mock_session.state = WorkerSessionState.STREAMING
+        coordinator.session_manager._session = mock_session
+        coordinator.injection_service.begin_session(FocusTarget(hwnd=9, text_input_profile="plain_editor"), "inject")
+
+        await coordinator._handle_worker_event(InterimResultEvent(text="你"))
+        await coordinator._handle_worker_event(InterimResultEvent(text="你好"))
+        await asyncio.sleep(0.05)
+
+        coordinator.overlay_service.submit_interim.assert_awaited_once_with("你好")
+        coordinator.injection_service.apply_inline_interim.assert_awaited_once_with("你好")
 
     @pytest.mark.asyncio
     async def test_handle_error_event(
@@ -176,6 +199,7 @@ class TestCoordinatorEventHandling:
         """验证错误事件处理。"""
         coordinator.overlay_service.hide = AsyncMock()
         coordinator._clear_active_session = AsyncMock()
+        coordinator._asr_preflight.invalidate = MagicMock()
 
         mock_session = MagicMock()
         mock_session.state = WorkerSessionState.STREAMING
@@ -184,6 +208,7 @@ class TestCoordinatorEventHandling:
         event = ErrorEvent(message="识别失败")
         await coordinator._handle_worker_event(event)
 
+        coordinator._asr_preflight.invalidate.assert_called_once()
         coordinator.overlay_service.hide.assert_called_once_with("error")
         assert "识别失败" in coordinator.get_status()
 
@@ -240,6 +265,34 @@ class TestCoordinatorEventHandling:
         coordinator._inject_final.assert_awaited_once_with("原始文本")
         coordinator.overlay_service.submit_final.assert_not_awaited()
         assert coordinator.get_status().startswith("最终结果:")
+
+    @pytest.mark.asyncio
+    async def test_handle_finished_event_can_commit_raw_even_when_polish_differs(
+        self, coordinator: VoiceInputCoordinator
+    ) -> None:
+        coordinator.config.final_commit_source = FINAL_COMMIT_SOURCE_RAW
+        coordinator.overlay_service.submit_final = AsyncMock()
+        coordinator.overlay_service.hide = AsyncMock()
+        coordinator._resolve_final_text = AsyncMock(
+            return_value=SimpleNamespace(text="润色后的文本", applied_mode="light", fallback_reason=None)
+        )
+        coordinator._inject_final = AsyncMock()
+        coordinator._clear_active_session = AsyncMock()
+        coordinator._segment_texts = {0: "原始文本"}
+        coordinator._last_displayed_raw_final_text = "原始文本"
+
+        mock_session = MagicMock()
+        mock_session.state = WorkerSessionState.STOPPING
+        mock_session.mode = "inject"
+        mock_session.stop_sent_at = None
+        mock_session.finished_at = None
+        coordinator.session_manager._session = mock_session
+
+        await coordinator._handle_worker_event(FinishedEvent())
+
+        coordinator._inject_final.assert_awaited_once_with("原始文本")
+        coordinator.overlay_service.submit_final.assert_not_awaited()
+        assert coordinator.get_status().startswith("最终提交原文:")
 
 
 class TestCoordinatorTextAggregation:
@@ -402,6 +455,63 @@ class TestCoordinatorConfigChanges:
         old_config = AgentConfig(ollama_base_url="http://localhost:11434")
         new_config = AgentConfig(ollama_base_url="http://other:11434")
         assert coordinator._polisher_config_changed(old_config, new_config) is True
+
+    @pytest.mark.asyncio
+    async def test_apply_config_invalidates_preflight_on_credential_path_change(
+        self, coordinator: VoiceInputCoordinator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        coordinator._asr_preflight.invalidate = MagicMock()
+        coordinator.hotkey_service.update_hotkey = MagicMock()
+        coordinator.overlay_service.configure = MagicMock()
+        coordinator.injection_service.configure = MagicMock()
+        coordinator.text_polisher.configure = MagicMock()
+        coordinator.capture_output_guard.configure = MagicMock()
+        monkeypatch.setattr(AgentConfig, "save", lambda self, path=None: None)
+
+        await coordinator._apply_config(AgentConfig(credential_path="other.json"))
+
+        coordinator._asr_preflight.invalidate.assert_called_once()
+
+
+class TestCoordinatorPreflight:
+    @pytest.mark.asyncio
+    async def test_handle_press_stops_when_preflight_fails(
+        self, coordinator: VoiceInputCoordinator
+    ) -> None:
+        coordinator.mode = "recognize"
+        coordinator._asr_preflight.ensure_available = AsyncMock(
+            return_value=SimpleNamespace(ok=False, stage="connect", message="网络异常")
+        )
+        coordinator.session_manager.ensure_worker = AsyncMock()
+
+        await coordinator._handle_press()
+
+        coordinator.session_manager.ensure_worker.assert_not_awaited()
+        assert coordinator.get_status() == "ASR 不可用: 网络异常"
+
+    @pytest.mark.asyncio
+    async def test_handle_press_runs_preflight_before_start(
+        self, coordinator: VoiceInputCoordinator
+    ) -> None:
+        coordinator.mode = "recognize"
+        coordinator._asr_preflight.ensure_available = AsyncMock(
+            return_value=SimpleNamespace(ok=True, stage="ok", message="", latency_ms=8)
+        )
+        coordinator.session_manager.ensure_worker = AsyncMock(
+            return_value=SimpleNamespace(state=WorkerSessionState.READY)
+        )
+        coordinator.session_manager.begin_session = MagicMock()
+        coordinator.session_manager.send_command = AsyncMock()
+        coordinator.injection_service.begin_session = MagicMock(return_value=None)
+        coordinator.overlay_service.show_microphone = AsyncMock()
+
+        await coordinator._handle_press()
+
+        coordinator._asr_preflight.ensure_available.assert_awaited_once_with(
+            coordinator.config.credential_path
+        )
+        coordinator.session_manager.ensure_worker.assert_awaited_once()
+        coordinator.session_manager.send_command.assert_awaited_once_with("START")
 
 
 class TestCoordinatorStop:

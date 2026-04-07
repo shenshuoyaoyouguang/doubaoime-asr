@@ -532,6 +532,16 @@ class TestSessionManagerInternalMethods:
         assert "PYTHONIOENCODING" in env
         assert env["PYTHONIOENCODING"] == "utf-8"
 
+    def test_select_ready_timeout_seconds_uses_cold_then_warm(self):
+        manager = SessionManager(
+            AgentConfig(worker_ready_timeout_ms=1800, worker_cold_ready_timeout_ms=4200),
+            _make_logger(),
+        )
+
+        assert manager._select_ready_timeout_seconds() == 4.2
+        manager._worker_started_once = True
+        assert manager._select_ready_timeout_seconds() == 1.8
+
     def test_build_worker_command_frozen(self):
         """测试构建 frozen 模式 Worker 命令。"""
         import sys
@@ -649,14 +659,19 @@ class TestSessionManagerInternalMethods:
     @pytest.mark.asyncio
     async def test_terminate_session_process_kills_on_timeout(self):
         """测试超时后强制终止进程。"""
-        manager = SessionManager(_make_config(), _make_logger())
+        manager = SessionManager(
+            AgentConfig(worker_exit_grace_timeout_ms=1500, worker_kill_wait_timeout_ms=700),
+            _make_logger(),
+        )
         process = _FakeProcess()
         process.returncode = None  # 进程不会自然退出
         session = WorkerSession(session_id=1, process=process)
         manager._session = session
+        wait_for_calls: list[float] = []
 
         async def fake_wait_for(awaitable, timeout):
-            if timeout == 2:
+            wait_for_calls.append(timeout)
+            if len(wait_for_calls) == 1:
                 close = getattr(awaitable, "close", None)
                 if callable(close):
                     close()
@@ -668,6 +683,7 @@ class TestSessionManagerInternalMethods:
             await manager._terminate_session_process(session)
 
         assert process.kill_called
+        assert wait_for_calls == [1.5, 0.7]
 
     @pytest.mark.asyncio
     async def test_wait_worker_calls_on_event(self):

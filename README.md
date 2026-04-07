@@ -153,6 +153,9 @@ python -m doubaoime_asr.agent.stable_main
   "microphone_device": null,
   "credential_path": "%APPDATA%/DoubaoVoiceInput/credentials.json",
   "injection_policy": "direct_then_clipboard",
+  "streaming_text_mode": "safe_inline",
+  "final_commit_source": "polished",
+  "polish_mode": "light",
   "render_debounce_ms": 80,
   "overlay_render_fps": 30,
   "overlay_font_size": 14,
@@ -182,10 +185,22 @@ doubao-voice-agent --hotkey space
 doubao-voice-agent --mode inject
 doubao-voice-agent --mode recognize --console
 doubao-voice-agent --injection-policy direct_then_clipboard
+doubao-voice-agent --streaming-text-mode overlay_only
+doubao-voice-agent --final-commit-source raw
 doubao-voice-agent --no-tray --console
 ```
 
-托盘菜单现在提供 **“设置”** 入口，可以直接修改热键、注入策略、麦克风和悬浮窗样式；保存后会尽量即时生效。热键支持**录制单键（含 Right Ctrl）**。默认注入策略是 `direct_then_clipboard`：先尝试直接输入，只有直接输入失败时才会使用剪贴板回退。如果你明确不希望任何情况下触碰剪贴板，可以改成 `direct_only`。终端（Windows Terminal / cmd / PowerShell）会自动使用终端专用注入策略；如果前台是**管理员终端/管理员窗口**，请从托盘选择 **“以管理员重启”**。
+托盘菜单现在提供 **“设置”** 入口，可以直接修改热键、注入策略、麦克风、实时文本模式、最终提交内容和悬浮窗样式；保存后会尽量即时生效。热键支持**录制单键（含 Right Ctrl）**。默认注入策略是 `direct_then_clipboard`：先尝试直接输入，只有直接输入失败时才会使用剪贴板回退。如果你明确不希望任何情况下触碰剪贴板，可以改成 `direct_only`。`streaming_text_mode` 支持：
+
+- `safe_inline`：对低风险普通编辑框尝试实时上屏
+- `overlay_only`：只显示浮层，不做实时注入，通常更稳
+
+`final_commit_source` 支持：
+
+- `polished`：最终提交润色结果（兼容当前默认行为）
+- `raw`：最终提交原始识别结果，更贴近浮层里看到的原文
+
+终端（Windows Terminal / cmd / PowerShell）会自动使用终端专用注入策略；如果前台是**管理员终端/管理员窗口**，请从托盘选择 **“以管理员重启”**。
 
 ### 打包为可分发程序
 
@@ -263,7 +278,7 @@ doubao-voice-agent-v0.2.1-windows-x64.zip
 ### 已知限制
 
 - 当前实现是“桌面代理”，不是原生 Windows IME / TSF 输入法
-- 流式上屏基于键盘注入，适用于大部分普通文本输入框；普通终端会走专用粘贴策略，但管理员权限窗口/管理员终端需要代理本身也以管理员身份运行
+- 流式上屏基于键盘注入，当前只会对低风险普通编辑框启用；浏览器/富文本/未知控件默认仅走浮层预览 + 最终提交，以降低丢字重字风险
 - 当前默认就是全局注入模式；如果需要排障，优先切到 `--mode recognize --console`
 
 ### 排障建议
@@ -272,9 +287,11 @@ doubao-voice-agent-v0.2.1-windows-x64.zip
 
 1. 先用 `python examples/mic_realtime.py` 确认 ASR 本身可用
 2. 再用 `doubao-voice-agent --mode recognize --console` 观察控制台状态输出
-3. 如果前台是管理员终端或管理员窗口，先从托盘执行 **“以管理员重启”**
-4. 查看 `%APPDATA%/DoubaoVoiceInput/logs/controller.log`
-4. 如果 Controller 已触发热键，再看 `%APPDATA%/DoubaoVoiceInput/logs/workers/` 下最新的 worker 日志
+3. 如果“浮层更准、落字反而不对”，先切 `--streaming-text-mode overlay_only`
+4. 如果“最终落字被润色改写”，再切 `--final-commit-source raw` 或在设置里把“最终提交内容”改成原始识别
+5. 如果前台是管理员终端或管理员窗口，先从托盘执行 **“以管理员重启”**
+6. 查看 `%APPDATA%/DoubaoVoiceInput/logs/controller.log`
+7. 如果 Controller 已触发热键，再看 `%APPDATA%/DoubaoVoiceInput/logs/workers/` 下最新的 worker 日志
 
 ## API 参考
 

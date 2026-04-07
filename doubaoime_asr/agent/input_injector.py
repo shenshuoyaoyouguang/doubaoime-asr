@@ -110,6 +110,7 @@ class FocusTarget:
     is_terminal: bool = False
     terminal_kind: str | None = None
     is_elevated: bool | None = None
+    text_input_profile: str = "plain_editor"
 
 
 class GUITHREADINFO(ctypes.Structure):
@@ -190,6 +191,57 @@ def classify_focus_target(process_name: str | None, window_class: str | None, fo
     if "consolewindowclass" in classes:
         return True, "console"
     return False, None
+
+
+def classify_text_input_profile(
+    process_name: str | None,
+    window_class: str | None,
+    focus_class: str | None,
+    *,
+    is_terminal: bool = False,
+) -> str:
+    if is_terminal:
+        return "terminal"
+
+    normalized_process = (process_name or "").casefold()
+    classes = {(window_class or "").casefold(), (focus_class or "").casefold()}
+    class_tokens = " ".join(token for token in classes if token)
+
+    browser_processes = {
+        "chrome.exe",
+        "msedge.exe",
+        "firefox.exe",
+        "brave.exe",
+        "opera.exe",
+        "vivaldi.exe",
+        "arc.exe",
+    }
+    browser_class_tokens = (
+        "chrome_widgetwin",
+        "mozilla",
+        "cef",
+        "webview",
+        "browser",
+    )
+    if normalized_process in browser_processes or any(token in class_tokens for token in browser_class_tokens):
+        return "browser_editable"
+
+    rich_edit_tokens = ("richedit", "msftedit", "scintilla")
+    if any(token in class_tokens for token in rich_edit_tokens):
+        return "rich_edit"
+
+    plain_editor_processes = {
+        "notepad.exe",
+        "write.exe",
+        "wordpad.exe",
+    }
+    plain_editor_classes = {"edit", "notepad", "notepad++", "textarea"}
+    if normalized_process in plain_editor_processes:
+        return "plain_editor"
+    if any(token and token in class_tokens for token in plain_editor_classes):
+        return "plain_editor"
+
+    return "unknown"
 
 
 def _send_inputs(inputs: Iterable[INPUT]) -> None:
@@ -285,6 +337,12 @@ class WindowsTextInjector:
         window_class = get_window_class_name(hwnd)
         focus_class = get_window_class_name(focus_hwnd or 0)
         is_terminal, terminal_kind = classify_focus_target(process_name, window_class, focus_class)
+        text_input_profile = classify_text_input_profile(
+            process_name,
+            window_class,
+            focus_class,
+            is_terminal=is_terminal,
+        )
         return FocusTarget(
             hwnd=hwnd,
             focus_hwnd=focus_hwnd,
@@ -295,6 +353,7 @@ class WindowsTextInjector:
             is_terminal=is_terminal,
             terminal_kind=terminal_kind,
             is_elevated=is_elevated,
+            text_input_profile=text_input_profile,
         )
 
     def ensure_target(self, target: FocusTarget) -> None:

@@ -115,6 +115,18 @@ class ASRError(Exception):
         self.response = response
 
 
+class ASRTransportError(ASRError):
+    """可重试的传输层错误。"""
+
+
+@dataclass
+class ASRProbeResult:
+    ok: bool
+    stage: str
+    message: str = ""
+    latency_ms: int = 0
+
+
 class _SessionState(BaseModel):
     """
     ASR 会话状态
@@ -123,6 +135,13 @@ class _SessionState(BaseModel):
     final_text: str = ""
     is_finished: bool = False
     error: Optional[ASRResponse] = None
+    transport_closed_unexpectedly: bool = False
+    received_final: bool = False
+    received_session_finished: bool = False
+
+
+def _latency_ms(started_at: float) -> int:
+    return int((time.perf_counter() - started_at) * 1000)
 
 
 class DoubaoASR:
@@ -227,8 +246,12 @@ class DoubaoASR:
                     with contextlib.suppress(asyncio.CancelledError):
                         await recv_task
 
+                if state.transport_closed_unexpectedly:
+                    raise ASRTransportError("WebSocket 在最终结果前意外断开")
+
         except websockets.exceptions.WebSocketException as e:
-            raise ASRError(f"WebSocket 错误: {e}") from e
+            raise ASRTransportError(f"WebSocket 错误: {e}") from e
+
 
     async def transcribe_realtime(
         self,
@@ -289,8 +312,11 @@ class DoubaoASR:
                     with contextlib.suppress(asyncio.CancelledError):
                         await recv_task
 
+                if state.transport_closed_unexpectedly:
+                    raise ASRTransportError("WebSocket 在最终结果前意外断开")
+
         except websockets.exceptions.WebSocketException as e:
-            raise ASRError(f"WebSocket 错误: {e}") from e
+            raise ASRTransportError(f"WebSocket 错误: {e}") from e
 
     async def _send_audio_realtime(
         self,
@@ -457,20 +483,91 @@ class DoubaoASR:
                     # 心跳包也放入队列，用于重置超时计时器
                     await queue.put(resp)
                 elif resp.type == ResponseType.SESSION_FINISHED:
+                    state.received_session_finished = True
                     state.is_finished = True
                     await queue.put(resp)
                     break
                 elif resp.type == ResponseType.FINAL_RESULT:
+                    state.received_final = True
                     state.final_text = resp.text
                     await queue.put(resp)
                 else:
                     await queue.put(resp)
 
         except websockets.exceptions.ConnectionClosed:
+            if not state.received_final and not state.received_session_finished:
+                state.transport_closed_unexpectedly = True
             state.is_finished = True
         finally:
             # 结束信号
             await queue.put(None)
+
+
+async def probe_asr_session(config: ASRConfig) -> ASRProbeResult:
+    """执行最小可用握手，用于会话启动前的健康检查。"""
+    started_at = time.perf_counter()
+    state = _SessionState()
+
+    try:
+        await asyncio.to_thread(config.ensure_credentials)
+        token = config.get_token()
+        session_config = config.session_config()
+    except Exception as exc:
+        return ASRProbeResult(
+            ok=False,
+            stage="credentials",
+            message=str(exc) or exc.__class__.__name__,
+            latency_ms=_latency_ms(started_at),
+        )
+
+    try:
+        async with websockets.connect(
+            config.ws_url,
+            additional_headers=config.headers,
+            open_timeout=config.connect_timeout,
+        ) as ws:
+            await ws.send(_build_start_task(state.request_id, token))
+            start_task_response = _parse_response(await ws.recv())
+            if start_task_response.type == ResponseType.ERROR:
+                return ASRProbeResult(
+                    ok=False,
+                    stage="start_task",
+                    message=start_task_response.error_msg or "StartTask 失败",
+                    latency_ms=_latency_ms(started_at),
+                )
+
+            await ws.send(_build_start_session(state.request_id, token, session_config))
+            start_session_response = _parse_response(await ws.recv())
+            if start_session_response.type == ResponseType.ERROR:
+                return ASRProbeResult(
+                    ok=False,
+                    stage="start_session",
+                    message=start_session_response.error_msg or "StartSession 失败",
+                    latency_ms=_latency_ms(started_at),
+                )
+
+            with contextlib.suppress(Exception):
+                await ws.send(_build_finish_session(state.request_id, token))
+    except websockets.exceptions.WebSocketException as exc:
+        return ASRProbeResult(
+            ok=False,
+            stage="connect",
+            message=str(exc) or exc.__class__.__name__,
+            latency_ms=_latency_ms(started_at),
+        )
+    except Exception as exc:
+        return ASRProbeResult(
+            ok=False,
+            stage="connect",
+            message=str(exc) or exc.__class__.__name__,
+            latency_ms=_latency_ms(started_at),
+        )
+
+    return ASRProbeResult(
+        ok=True,
+        stage="ok",
+        latency_ms=_latency_ms(started_at),
+    )
 
 
     

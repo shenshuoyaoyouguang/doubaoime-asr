@@ -3,8 +3,10 @@ import pytest
 from doubaoime_asr.agent.config import (
     AgentConfig,
     CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT,
+    FINAL_COMMIT_SOURCE_RAW,
     INJECTION_POLICY_DIRECT_THEN_CLIPBOARD,
     POLISH_MODE_OLLAMA,
+    STREAMING_TEXT_MODE_OVERLAY_ONLY,
 )
 from doubaoime_asr.agent.settings_window import (
     FIELD_TO_PAGE,
@@ -35,10 +37,12 @@ def test_build_config_from_settings_values_updates_runtime_fields():
             "hotkey_display": "F9",
             "mode": "recognize",
             "microphone_device": "index:3",
+            "streaming_text_mode": STREAMING_TEXT_MODE_OVERLAY_ONLY,
             "injection_policy": INJECTION_POLICY_DIRECT_THEN_CLIPBOARD,
             "capture_output_policy": CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT,
             "render_debounce_ms": "40",
             "polish_mode": POLISH_MODE_OLLAMA,
+            "final_commit_source": FINAL_COMMIT_SOURCE_RAW,
             "ollama_base_url": "http://127.0.0.1:11434/",
             "ollama_model": "qwen2.5:3b",
             "polish_timeout_ms": "900",
@@ -57,9 +61,11 @@ def test_build_config_from_settings_values_updates_runtime_fields():
     assert updated.hotkey_display == "F9"
     assert updated.mode == "recognize"
     assert updated.microphone_device == 3
+    assert updated.streaming_text_mode == STREAMING_TEXT_MODE_OVERLAY_ONLY
     assert updated.injection_policy == INJECTION_POLICY_DIRECT_THEN_CLIPBOARD
     assert updated.capture_output_policy == CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT
     assert updated.polish_mode == POLISH_MODE_OLLAMA
+    assert updated.final_commit_source == FINAL_COMMIT_SOURCE_RAW
     assert updated.ollama_base_url == "http://127.0.0.1:11434"
     assert updated.ollama_model == "qwen2.5:3b"
     assert updated.polish_timeout_ms == 900
@@ -76,10 +82,12 @@ def test_build_config_from_settings_values_canonicalizes_right_ctrl():
             "hotkey_display": "CTRL",
             "mode": "inject",
             "microphone_device": "__default__",
+            "streaming_text_mode": "safe_inline",
             "injection_policy": "direct_only",
             "capture_output_policy": "off",
             "render_debounce_ms": "80",
             "polish_mode": "off",
+            "final_commit_source": "polished",
             "ollama_base_url": "http://localhost:11434",
             "ollama_model": "",
             "polish_timeout_ms": "800",
@@ -106,10 +114,12 @@ def test_build_config_from_settings_values_rejects_invalid_hotkey():
                 "hotkey": "ctrl+space",
                 "mode": "inject",
                 "microphone_device": "__default__",
+                "streaming_text_mode": "safe_inline",
                 "injection_policy": "direct_only",
                 "capture_output_policy": "off",
                 "render_debounce_ms": "80",
                 "polish_mode": "off",
+                "final_commit_source": "polished",
                 "ollama_base_url": "http://localhost:11434",
                 "ollama_model": "",
                 "polish_timeout_ms": "800",
@@ -133,10 +143,12 @@ def test_build_config_from_settings_values_rejects_invalid_capture_output_policy
                 "hotkey_display": "F8",
                 "mode": "inject",
                 "microphone_device": "__default__",
+                "streaming_text_mode": "safe_inline",
                 "injection_policy": "direct_only",
                 "capture_output_policy": "invalid",
                 "render_debounce_ms": "80",
                 "polish_mode": "off",
+                "final_commit_source": "polished",
                 "ollama_base_url": "http://localhost:11434",
                 "ollama_model": "",
                 "polish_timeout_ms": "800",
@@ -158,7 +170,7 @@ def test_should_show_ollama_fields_tracks_polish_mode():
 
 
 def test_visible_fields_for_page_hides_ollama_details_until_needed():
-    assert visible_fields_for_page("polish", "light") == ["polish_mode"]
+    assert visible_fields_for_page("polish", "light") == ["polish_mode", "final_commit_source"]
     assert visible_fields_for_page("polish", "ollama") == list(PAGE_FIELDS["polish"])
 
 
@@ -166,10 +178,12 @@ def test_settings_values_from_config_roundtrip_matches_current_model():
     config = AgentConfig(
         mode="recognize",
         microphone_device=2,
+        streaming_text_mode=STREAMING_TEXT_MODE_OVERLAY_ONLY,
         injection_policy="direct_only",
         capture_output_policy="mute_system_output",
         render_debounce_ms=40,
         polish_mode="light",
+        final_commit_source=FINAL_COMMIT_SOURCE_RAW,
         overlay_font_size=16,
         overlay_opacity_percent=88,
     )
@@ -178,9 +192,11 @@ def test_settings_values_from_config_roundtrip_matches_current_model():
 
     assert values["mode"] == "recognize"
     assert values["microphone_device"] == "index:2"
+    assert values["streaming_text_mode"] == STREAMING_TEXT_MODE_OVERLAY_ONLY
     assert values["injection_policy"] == "direct_only"
     assert values["capture_output_policy"] == "mute_system_output"
     assert values["render_debounce_ms"] == "40"
+    assert values["final_commit_source"] == FINAL_COMMIT_SOURCE_RAW
     assert values["overlay_font_size"] == "16"
     assert values["overlay_opacity_percent"] == "88"
 
@@ -254,14 +270,46 @@ def test_build_config_from_settings_values_reports_invalid_field_name():
     assert exc_info.value.field_name == "render_debounce_ms"
 
 
+def test_build_config_from_settings_values_rejects_invalid_final_commit_source():
+    with pytest.raises(SettingsValidationError) as exc_info:
+        build_config_from_settings_values(
+            AgentConfig(),
+            {
+                "hotkey_vk": "119",
+                "hotkey_display": "F8",
+                "mode": "inject",
+                "microphone_device": "__default__",
+                "streaming_text_mode": "safe_inline",
+                "injection_policy": "direct_only",
+                "capture_output_policy": "off",
+                "render_debounce_ms": "80",
+                "polish_mode": "off",
+                "final_commit_source": "bad",
+                "ollama_base_url": "http://localhost:11434",
+                "ollama_model": "",
+                "polish_timeout_ms": "800",
+                "ollama_warmup_enabled": "true",
+                "overlay_render_fps": "30",
+                "overlay_font_size": "14",
+                "overlay_max_width": "620",
+                "overlay_opacity_percent": "92",
+                "overlay_bottom_offset": "120",
+                "overlay_animation_ms": "150",
+            },
+        )
+
+    assert exc_info.value.field_name == "final_commit_source"
+
+
 def test_page_heading_reflects_progressive_hierarchy():
     assert page_heading("general") == f"1/{len(PAGE_ORDER)} · 常用"
     assert page_heading("overlay") == f"4/{len(PAGE_ORDER)} · 浮层显示"
 
 
 def test_page_footer_hint_changes_with_polish_mode_state():
-    assert "Ollama" in page_footer_hint("polish", "light")
-    assert "本地模型" in page_footer_hint("polish", "ollama")
+    assert "提交原文" in page_footer_hint("polish", "light")
+    assert "提交原文" in page_footer_hint("polish", "ollama")
+    assert "仅显示浮层" in page_footer_hint("behavior", "light")
     assert "预览" in page_footer_hint("overlay", "light")
 
 

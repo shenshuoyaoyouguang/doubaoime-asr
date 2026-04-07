@@ -129,6 +129,7 @@ class SessionManager:
         self._next_session_id = 0
         self._stopping = False
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._worker_started_once = False
 
     # ===== 生命周期管理 =====
 
@@ -161,10 +162,19 @@ class SessionManager:
         self._loop = asyncio.get_running_loop()
 
         # 等待进程就绪
-        deadline = self._loop.time() + 2.5
+        timeout_s = self._select_ready_timeout_seconds()
+        self.logger.info(
+            "worker_wait_ready session_id=%s start_kind=%s timeout_ms=%s",
+            session.session_id,
+            "warm" if self._worker_started_once else "cold",
+            int(timeout_s * 1000),
+        )
+        started_at = self._loop.time()
+        deadline = started_at + timeout_s
         while self._loop.time() < deadline:
             if session.process_ready:
                 session.transition_to(WorkerSessionState.READY)
+                self._worker_started_once = True
                 self.logger.info("worker_ready session_id=%s pid=%s", session.session_id, process.pid)
                 return session
             if session.process.returncode is not None:
@@ -173,6 +183,11 @@ class SessionManager:
 
         await self._terminate_session_process(session)
         await self._dispose_worker()
+        self.logger.warning(
+            "worker_wait_ready_timeout session_id=%s waited_ms=%s",
+            session.session_id,
+            int((self._loop.time() - started_at) * 1000),
+        )
         raise RuntimeError("worker process did not become ready")
 
     async def terminate_worker(self) -> None:
@@ -338,6 +353,11 @@ class SessionManager:
         env["PYTHONIOENCODING"] = "utf-8"
         return env
 
+    def _select_ready_timeout_seconds(self) -> float:
+        return self.config.worker_ready_timeout_seconds(
+            cold_start=not self._worker_started_once,
+        )
+
     async def _read_worker_stdout(
         self,
         stream: asyncio.StreamReader | None,
@@ -388,16 +408,18 @@ class SessionManager:
     async def _terminate_session_process(self, session: WorkerSession) -> None:
         """终止会话进程。"""
         process = session.process
+        grace_timeout_s = self.config.worker_exit_grace_timeout_seconds()
+        kill_wait_timeout_s = self.config.worker_kill_wait_timeout_seconds()
         if process.stdin is not None and process.returncode is None:
             with contextlib.suppress(Exception):
                 await self.send_command("EXIT")
         try:
-            await asyncio.wait_for(process.wait(), timeout=2)
+            await asyncio.wait_for(process.wait(), timeout=grace_timeout_s)
         except (asyncio.TimeoutError, ProcessLookupError):
             with contextlib.suppress(ProcessLookupError):
                 process.kill()
             with contextlib.suppress(asyncio.TimeoutError, ProcessLookupError):
-                await asyncio.wait_for(process.wait(), timeout=2)
+                await asyncio.wait_for(process.wait(), timeout=kill_wait_timeout_s)
 
     async def _dispose_worker(self) -> None:
         """清理 Worker 资源。"""

@@ -21,6 +21,7 @@ from doubaoime_asr.agent import stable_simple_app
 from doubaoime_asr.agent.config import (
     AgentConfig,
     CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT,
+    FINAL_COMMIT_SOURCE_RAW,
     INJECTION_POLICY_DIRECT_ONLY,
     POLISH_MODE_OLLAMA,
     STREAMING_TEXT_MODE_SAFE_INLINE,
@@ -225,7 +226,7 @@ def test_handle_worker_exit_ignores_stale_session(monkeypatch: pytest.MonkeyPatc
 
 
 def test_ensure_worker_timeout_terminates_process_before_dispose(monkeypatch: pytest.MonkeyPatch):
-    app = _build_app(monkeypatch)
+    app = _build_app(monkeypatch, AgentConfig(worker_cold_ready_timeout_ms=4200))
     process = SimpleNamespace(returncode=None, stdout=None, stderr=None, stdin=None)
     terminated_sessions: list[stable_simple_app.WorkerSession] = []
 
@@ -256,10 +257,24 @@ def test_ensure_worker_timeout_terminates_process_before_dispose(monkeypatch: py
     assert app._session is None
 
 
+def test_select_worker_ready_timeout_seconds_uses_cold_then_warm(monkeypatch: pytest.MonkeyPatch):
+    app = _build_app(
+        monkeypatch,
+        AgentConfig(worker_ready_timeout_ms=1800, worker_cold_ready_timeout_ms=4200),
+    )
+
+    assert app._select_worker_ready_timeout_seconds() == 4.2
+    app._coordinator.session_manager._worker_started_once = True
+    assert app._select_worker_ready_timeout_seconds() == 1.8
+
+
 def test_terminate_worker_waits_for_killed_process(monkeypatch: pytest.MonkeyPatch):
-    app = _build_app(monkeypatch)
+    app = _build_app(
+        monkeypatch,
+        AgentConfig(worker_exit_grace_timeout_ms=1500, worker_kill_wait_timeout_ms=700),
+    )
     session = _build_session(11)
-    wait_for_calls: list[int] = []
+    wait_for_calls: list[float] = []
     sent_commands: list[str] = []
 
     class _FakeProcess:
@@ -296,7 +311,7 @@ def test_terminate_worker_waits_for_killed_process(monkeypatch: pytest.MonkeyPat
 
     assert sent_commands == ["EXIT"]
     assert process.kill_calls == 1
-    assert wait_for_calls == [2, 2]
+    assert wait_for_calls == [1.5, 0.7]
     assert app._session is None
 
 
@@ -416,8 +431,35 @@ def test_handle_worker_final_fallback_status_uses_raw_text(monkeypatch: pytest.M
     assert app._status == "润色超时，已使用原文: 原始识别文本"
 
 
+def test_handle_worker_final_can_commit_raw_text_when_configured(monkeypatch: pytest.MonkeyPatch):
+    config = AgentConfig(polish_mode=POLISH_MODE_OLLAMA, final_commit_source=FINAL_COMMIT_SOURCE_RAW)
+    app = _build_app(monkeypatch, config)
+    session = _build_session(41)
+    session.active = True
+    session.mode = "recognize"
+    app._session = session
+    app.text_polisher.result = PolishResult(text="润色后的文本。", applied_mode="ollama", latency_ms=120)
+
+    injected: list[str] = []
+
+    async def fake_inject(text: str) -> None:
+        injected.append(text)
+
+    monkeypatch.setattr(app, "_inject_final", fake_inject)
+
+    asyncio.run(app._handle_worker_event(41, {"type": "final", "text": "原文", "segment_index": 0}))
+    asyncio.run(app._handle_worker_event(41, {"type": "finished"}))
+
+    assert injected == ["原文"]
+    assert app.overlay_scheduler.calls == [
+        ("final", ("原文", "final_raw")),
+        ("hide", ("finished",)),
+    ]
+    assert app._status == "最终提交原文: 原文"
+
+
 def test_handle_worker_interim_updates_inline_composition(monkeypatch: pytest.MonkeyPatch):
-    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE, render_debounce_ms=0)
     app = _build_app(monkeypatch, config)
     session = _build_session(9)
     session.active = True
@@ -455,7 +497,7 @@ def test_handle_worker_event_ignores_stale_session_id(monkeypatch: pytest.Monkey
 
 
 def test_runtime_inline_callbacks_use_injection_service_session(monkeypatch: pytest.MonkeyPatch):
-    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE, render_debounce_ms=0)
     app = _build_app(monkeypatch, config)
     target = stable_simple_app.FocusTarget(hwnd=21, is_terminal=False)
     runtime_session = _build_runtime_session(21, target=target)
@@ -513,7 +555,7 @@ def test_handle_worker_audio_level_updates_overlay(monkeypatch: pytest.MonkeyPat
 
 
 def test_handle_worker_interim_keeps_previous_final_segments(monkeypatch: pytest.MonkeyPatch):
-    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE, render_debounce_ms=0)
     app = _build_app(monkeypatch, config)
     session = _build_session(91)
     session.active = True
@@ -574,7 +616,7 @@ def test_handle_worker_finished_injects_aggregated_text_once(monkeypatch: pytest
 
 
 def test_apply_inline_interim_blocks_final_fallback_after_inline_failure(monkeypatch: pytest.MonkeyPatch):
-    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE, render_debounce_ms=0)
     app = _build_app(monkeypatch, config)
     session = _build_session(10)
     session.active = True
@@ -593,7 +635,7 @@ def test_apply_inline_interim_blocks_final_fallback_after_inline_failure(monkeyp
 
 
 def test_inject_final_uses_inline_composition_when_available(monkeypatch: pytest.MonkeyPatch):
-    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE, render_debounce_ms=0)
     app = _build_app(monkeypatch, config)
     session = _build_session(11)
     session.active = True
@@ -615,7 +657,7 @@ def test_inject_final_uses_inline_composition_when_available(monkeypatch: pytest
 
 
 def test_inject_final_does_not_fallback_type_when_inline_text_exists(monkeypatch: pytest.MonkeyPatch):
-    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE)
+    config = AgentConfig(mode="inject", streaming_text_mode=STREAMING_TEXT_MODE_SAFE_INLINE, render_debounce_ms=0)
     app = _build_app(monkeypatch, config)
     session = _build_session(12)
     session.active = True

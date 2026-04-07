@@ -53,8 +53,9 @@ class TextInjectionManager:
         self.injector.ensure_target(target)
         target_profile = "terminal" if target.is_terminal else "editor"
         self.logger.info(
-            "inject_target profile=%s process=%s window_class=%s focus_class=%s terminal_kind=%s elevated=%s",
+            "inject_target profile=%s text_profile=%s process=%s window_class=%s focus_class=%s terminal_kind=%s elevated=%s",
             target_profile,
+            target.text_input_profile,
             target.process_name,
             target.window_class,
             target.focus_class,

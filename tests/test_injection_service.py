@@ -65,6 +65,7 @@ def editor_target() -> FocusTarget:
         process_name="notepad.exe",
         window_class="Notepad",
         is_terminal=False,
+        text_input_profile="plain_editor",
     )
 
 
@@ -76,6 +77,18 @@ def elevated_target() -> FocusTarget:
         is_terminal=True,
         terminal_kind="console",
         is_elevated=True,
+    )
+
+
+@pytest.fixture
+def browser_target() -> FocusTarget:
+    return FocusTarget(
+        hwnd=4,
+        process_name="chrome.exe",
+        window_class="Chrome_WidgetWin_1",
+        focus_class="Chrome_RenderWidgetHostHWND",
+        is_terminal=False,
+        text_input_profile="browser_editable",
     )
 
 
@@ -458,6 +471,15 @@ def test_should_not_enable_inline_streaming_in_overlay_only_mode(
     service = InjectionService(logging.getLogger("test"), config)
     service.begin_session(editor_target, "inject")
     assert service.should_enable_inline_streaming(editor_target) is False
+
+
+def test_should_not_enable_inline_streaming_for_browser_profile(
+    injection_service: InjectionService,
+    browser_target: FocusTarget,
+):
+    """测试浏览器类控件默认不启用流式上屏。"""
+    injection_service.begin_session(browser_target, "inject")
+    assert injection_service.should_enable_inline_streaming(browser_target) is False
 
 
 @pytest.mark.asyncio

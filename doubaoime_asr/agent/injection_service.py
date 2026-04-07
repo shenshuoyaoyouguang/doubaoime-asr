@@ -23,6 +23,7 @@ from .input_injector import FocusChangedError, FocusTarget
 
 
 Mode = Literal["recognize", "inject"]
+INLINE_STREAMING_ALLOWED_PROFILES = frozenset({"plain_editor"})
 
 
 @dataclass(slots=True)
@@ -120,6 +121,14 @@ class InjectionService:
             mode,
             composition=composition,
             inline_streaming_enabled=inline_streaming_enabled,
+        )
+        self._logger.info(
+            "injection_session_started mode=%s inline_enabled=%s text_profile=%s process=%s terminal_kind=%s",
+            mode,
+            inline_streaming_enabled,
+            self._target_profile(target),
+            target.process_name if target is not None else None,
+            target.terminal_kind if target is not None else None,
         )
         return composition
 
@@ -222,13 +231,23 @@ class InjectionService:
         条件：
         1. 当前模式为 inject
         2. 配置的流式文本模式为 safe_inline
-        3. 目标不是终端
+        3. 目标 profile 在 allowlist 中
         """
-        return (
+        allowed = (
             self._session.mode == "inject"
             and self._config.streaming_text_mode == STREAMING_TEXT_MODE_SAFE_INLINE
-            and not target.is_terminal
+            and self._target_profile(target) in INLINE_STREAMING_ALLOWED_PROFILES
         )
+        self._logger.info(
+            "inline_streaming_decision allowed=%s mode=%s streaming_text_mode=%s text_profile=%s process=%s terminal=%s",
+            allowed,
+            self._session.mode,
+            self._config.streaming_text_mode,
+            self._target_profile(target),
+            target.process_name,
+            target.is_terminal,
+        )
+        return allowed
 
     def is_inline_streaming_enabled(self) -> bool:
         """检查当前会话是否启用了流式上屏。"""
@@ -332,6 +351,13 @@ class InjectionService:
     def _target_requires_admin(self, target: FocusTarget | None) -> bool:
         """内部方法：检查目标是否需要管理员权限。"""
         return target is not None and target.is_elevated is True and not self._process_elevated
+
+    def _target_profile(self, target: FocusTarget | None) -> str:
+        if target is None:
+            return "none"
+        if target.is_terminal:
+            return "terminal"
+        return target.text_input_profile
 
     # ===== 配置更新 =====
 

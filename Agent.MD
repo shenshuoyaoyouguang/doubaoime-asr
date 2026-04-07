@@ -1,5 +1,9 @@
 # Agent Notes
 
+- 当前开发机上运行 `pytest` 时，默认 `%LOCALAPPDATA%\\Temp\\pytest-of-76578` 可能触发 `PermissionError: [WinError 5]`。
+  - 建议在执行测试前显式设置工作区内临时目录，例如：
+    - PowerShell：`$env:TMP = (Resolve-Path .tmp-pytest).Path; $env:TEMP = $env:TMP`
+  - 否则 `tmp_path` 相关测试会误报失败，掩盖真实结果。
 - `doubaoime_asr/agent/stable_simple_app.py` 的 compat 包装层不能直接覆盖运行态实现。
   - `SessionManager._on_event` 必须桥接回 coordinator 事件队列，否则 `run()` 路径会丢 worker interim/final/finished/exit 事件。
   - `InjectionService.begin_session()` 创建的运行态 inline composition 状态不在 compat `app._session` 上；inline/最终提交逻辑必须保留 runtime 原始实现，只有显式测试会话覆盖时才走 compat 包装。
@@ -10,3 +14,6 @@
 - `doubaoime_asr/agent/coordinator.py` 本体也必须自带运行态连线：
   - 直接实例化 `VoiceInputCoordinator` 时，`SessionManager` 需要在构造时就绑定 `on_event`，否则 worker stdout 解析出的 ready/interim/final/finished 事件不会进入协调器事件队列。
   - `VoiceInputCoordinator` 在启动时计算出的 `_process_elevated` 需要同步写入 `InjectionService.set_process_elevated()`；否则管理员目标仍会被 `target_requires_admin()` 误判为不可注入。
+- Windows 上跑 `tests/test_stable_simple_app.py` / `tests/test_coordinator.py` 相关用例时，当前仓库可能出现 `PytestUnraisableExceptionWarning`，栈里是 `BaseSubprocessTransport.__del__` / `Event loop is closed`。
+  - 这看起来是已有的 asyncio subprocess 清理时序问题，不是本轮 interim dispatcher / inline profile 改动直接引入的失败。
+  - 如果后续有人继续清理这块，请优先排查 `SessionManager`/worker 相关测试 double 关闭 transport 或在 loop 关闭后析构 subprocess pipe 的路径。

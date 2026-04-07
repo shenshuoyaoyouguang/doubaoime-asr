@@ -34,6 +34,7 @@ def test_stable_cli_defaults_to_recognize(monkeypatch):
     assert config.polish_mode == "light"
     assert config.overlay_render_fps == 60
     assert config.streaming_text_mode == "safe_inline"
+    assert config.final_commit_source == "polished"
 
 
 def test_stable_cli_config_override(monkeypatch):
@@ -51,6 +52,8 @@ def test_stable_cli_config_override(monkeypatch):
             "overlay_only",
             "--capture-output-policy",
             "mute_system_output",
+            "--final-commit-source",
+            "raw",
             "--polish-mode",
             "ollama",
             "--ollama-base-url",
@@ -60,6 +63,14 @@ def test_stable_cli_config_override(monkeypatch):
             "--polish-timeout-ms",
             "900",
             "--disable-ollama-warmup",
+            "--worker-ready-timeout-ms",
+            "1800",
+            "--worker-cold-ready-timeout-ms",
+            "4200",
+            "--worker-exit-grace-timeout-ms",
+            "1500",
+            "--worker-kill-wait-timeout-ms",
+            "700",
         ]
     )
     config = build_config_from_args(args)
@@ -70,12 +81,17 @@ def test_stable_cli_config_override(monkeypatch):
     assert config.hotkey_display == "F9"
     assert config.render_debounce_ms == 50
     assert config.streaming_text_mode == "overlay_only"
+    assert config.final_commit_source == "raw"
     assert config.capture_output_policy == "mute_system_output"
     assert config.polish_mode == "ollama"
     assert config.ollama_base_url == "http://127.0.0.1:11434"
     assert config.ollama_model == "qwen2.5:3b"
     assert config.polish_timeout_ms == 900
     assert config.ollama_warmup_enabled is False
+    assert config.worker_ready_timeout_ms == 1800
+    assert config.worker_cold_ready_timeout_ms == 4200
+    assert config.worker_exit_grace_timeout_ms == 1500
+    assert config.worker_kill_wait_timeout_ms == 700
 
 
 def test_stable_cli_accepts_console_and_no_tray():

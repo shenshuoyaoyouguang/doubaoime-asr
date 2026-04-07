@@ -10,15 +10,21 @@ from .config import (
     CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT,
     CAPTURE_OUTPUT_POLICY_OFF,
     DEFAULT_OLLAMA_BASE_URL,
+    FINAL_COMMIT_SOURCE_POLISHED,
+    FINAL_COMMIT_SOURCE_RAW,
     INJECTION_POLICY_DIRECT_ONLY,
     INJECTION_POLICY_DIRECT_THEN_CLIPBOARD,
     POLISH_MODE_LIGHT,
     POLISH_MODE_OFF,
     POLISH_MODE_OLLAMA,
     SUPPORTED_CAPTURE_OUTPUT_POLICIES,
+    SUPPORTED_FINAL_COMMIT_SOURCES,
     SUPPORTED_INJECTION_POLICIES,
     SUPPORTED_MODES,
     SUPPORTED_POLISH_MODES,
+    SUPPORTED_STREAMING_TEXT_MODES,
+    STREAMING_TEXT_MODE_OVERLAY_ONLY,
+    STREAMING_TEXT_MODE_SAFE_INLINE,
 )
 from .win_hotkey import normalize_hotkey, vk_from_hotkey, vk_to_display, vk_to_hotkey
 from .win_keyboard_hook import SingleKeyRecorder, VK_RCONTROL
@@ -34,6 +40,11 @@ INJECTION_POLICY_OPTIONS: list[tuple[str, str]] = [
     (INJECTION_POLICY_DIRECT_ONLY, "仅直接输入（绝不动剪贴板）"),
 ]
 
+STREAMING_TEXT_MODE_OPTIONS: list[tuple[str, str]] = [
+    (STREAMING_TEXT_MODE_SAFE_INLINE, "安全实时上屏（普通编辑框）"),
+    (STREAMING_TEXT_MODE_OVERLAY_ONLY, "仅显示浮层（更稳）"),
+]
+
 CAPTURE_OUTPUT_OPTIONS: list[tuple[str, str]] = [
     (CAPTURE_OUTPUT_POLICY_OFF, "保持现状"),
     (CAPTURE_OUTPUT_POLICY_MUTE_SYSTEM_OUTPUT, "录音时静音系统输出"),
@@ -43,6 +54,11 @@ POLISH_MODE_OPTIONS: list[tuple[str, str]] = [
     (POLISH_MODE_LIGHT, "轻量整理（推荐）"),
     (POLISH_MODE_OFF, "关闭"),
     (POLISH_MODE_OLLAMA, "Ollama 本地润色（较慢）"),
+]
+
+FINAL_COMMIT_SOURCE_OPTIONS: list[tuple[str, str]] = [
+    (FINAL_COMMIT_SOURCE_POLISHED, "提交润色结果（兼容当前行为）"),
+    (FINAL_COMMIT_SOURCE_RAW, "提交原始识别（更贴近浮层）"),
 ]
 
 WARMUP_OPTIONS: list[tuple[str, str]] = [
@@ -65,9 +81,10 @@ PAGE_DESCRIPTIONS: dict[str, str] = {
 }
 PAGE_FIELDS: dict[str, tuple[str, ...]] = {
     "general": ("hotkey_display", "mode", "microphone_device"),
-    "behavior": ("render_debounce_ms", "injection_policy", "capture_output_policy"),
+    "behavior": ("streaming_text_mode", "render_debounce_ms", "injection_policy", "capture_output_policy"),
     "polish": (
         "polish_mode",
+        "final_commit_source",
         "ollama_base_url",
         "ollama_model",
         "polish_timeout_ms",
@@ -91,10 +108,12 @@ FIELD_LABELS: dict[str, str] = {
     "hotkey_display": "热键",
     "mode": "模式",
     "microphone_device": "麦克风",
+    "streaming_text_mode": "实时文本模式",
     "render_debounce_ms": "流式防抖(ms)",
     "injection_policy": "注入策略",
     "capture_output_policy": "系统输出处理",
     "polish_mode": "最终润色",
+    "final_commit_source": "最终提交内容",
     "ollama_base_url": "Ollama 地址",
     "ollama_model": "Ollama 模型",
     "polish_timeout_ms": "润色超时(ms)",
@@ -110,10 +129,12 @@ FIELD_HELP_TEXT: dict[str, str] = {
     "hotkey_display": "支持录制单键，包含 Right Ctrl。",
     "mode": "自动上屏适合聊天；仅识别适合先确认文本。",
     "microphone_device": "建议先使用系统默认，异常时再手动切换。",
+    "streaming_text_mode": "普通编辑框可尝试实时上屏；如果遇到丢字重字，优先切到仅显示浮层。",
     "render_debounce_ms": "数值越小越灵敏，过低可能导致显示闪动。",
     "injection_policy": "兼容模式失败时会自动回退到剪贴板。",
     "capture_output_policy": "如果录音时担心系统声音干扰，可以临时静音输出。",
     "polish_mode": "轻量整理适合大多数场景；本地模型更强但更慢。",
+    "final_commit_source": "可选择最终提交原文或润色结果，避免“浮层更准、落字被改写”的困惑。",
     "ollama_base_url": "通常保持 http://localhost:11434 即可。",
     "ollama_model": "为空时仅在唯一模型场景下自动探测。",
     "polish_timeout_ms": "超时后会自动回退原始识别结果。",
@@ -134,9 +155,11 @@ OLLAMA_FIELD_NAMES: tuple[str, ...] = (
 COMBO_FIELD_NAMES: tuple[str, ...] = (
     "mode",
     "microphone_device",
+    "streaming_text_mode",
     "injection_policy",
     "capture_output_policy",
     "polish_mode",
+    "final_commit_source",
     "ollama_warmup_enabled",
 )
 EDIT_FIELD_NAMES: tuple[str, ...] = (
@@ -192,10 +215,12 @@ def settings_values_from_config(config: AgentConfig) -> dict[str, str]:
         "hotkey_display": config.effective_hotkey_display(),
         "mode": config.mode,
         "microphone_device": _microphone_choice_value(config.microphone_device),
+        "streaming_text_mode": config.streaming_text_mode,
         "injection_policy": config.injection_policy,
         "capture_output_policy": config.capture_output_policy,
         "render_debounce_ms": str(config.render_debounce_ms),
         "polish_mode": config.polish_mode,
+        "final_commit_source": config.final_commit_source,
         "ollama_base_url": config.ollama_base_url,
         "ollama_model": config.ollama_model,
         "polish_timeout_ms": str(config.polish_timeout_ms),
@@ -230,11 +255,11 @@ def page_footer_hint(page_name: str, polish_mode: str) -> str:
     if page_name == "general":
         return "提示：先完成热键和模式，再按需要调整后面的高级设置。"
     if page_name == "behavior":
-        return "提示：行为设置会影响后续录音与上屏体验。"
+        return "提示：如果某些软件实时上屏不稳，先把实时文本模式切到“仅显示浮层”。"
     if page_name == "polish":
         if should_show_ollama_fields(polish_mode):
-            return "提示：本地模型只处理最终文本；修改地址或模型后记得保存。"
-        return "提示：轻量整理适合多数场景；选择 Ollama 后才会显示高级配置。"
+            return "提示：可单独决定最终提交原文还是润色结果；修改地址或模型后记得保存。"
+        return "提示：轻量整理适合多数场景；也可以选择只润色显示、最终仍提交原文。"
     if page_name == "overlay":
         return "提示：可以先预览浮层，确认样式后再保存；预览不会写入配置。"
     return ""
@@ -294,6 +319,10 @@ def build_config_from_settings_values(
     if mode not in SUPPORTED_MODES:
         raise SettingsValidationError("模式无效", field_name="mode")
 
+    streaming_text_mode = values.get("streaming_text_mode", base_config.streaming_text_mode)
+    if streaming_text_mode not in SUPPORTED_STREAMING_TEXT_MODES:
+        raise SettingsValidationError("实时文本模式无效", field_name="streaming_text_mode")
+
     injection_policy = values.get("injection_policy", "")
     if injection_policy not in SUPPORTED_INJECTION_POLICIES:
         raise SettingsValidationError("注入策略无效", field_name="injection_policy")
@@ -305,6 +334,10 @@ def build_config_from_settings_values(
     polish_mode = values.get("polish_mode", "")
     if polish_mode not in SUPPORTED_POLISH_MODES:
         raise SettingsValidationError("润色模式无效", field_name="polish_mode")
+
+    final_commit_source = values.get("final_commit_source", base_config.final_commit_source)
+    if final_commit_source not in SUPPORTED_FINAL_COMMIT_SOURCES:
+        raise SettingsValidationError("最终提交内容无效", field_name="final_commit_source")
 
     try:
         microphone_device = _parse_microphone_value(values.get("microphone_device", "__default__"))
@@ -343,6 +376,7 @@ def build_config_from_settings_values(
         hotkey_display=hotkey_display,
         mode=mode,
         microphone_device=microphone_device,
+        streaming_text_mode=streaming_text_mode,
         injection_policy=injection_policy,
         capture_output_policy=capture_output_policy,
         render_debounce_ms=_parse_int(
@@ -353,6 +387,7 @@ def build_config_from_settings_values(
             field_name="render_debounce_ms",
         ),
         polish_mode=polish_mode,
+        final_commit_source=final_commit_source,
         ollama_base_url=ollama_base_url,
         ollama_model=ollama_model,
         polish_timeout_ms=polish_timeout_ms,
@@ -956,6 +991,9 @@ class SettingsWindowController:
                 values["microphone_device"],
             )
             return
+        if field_name == "streaming_text_mode":
+            self._set_combo_items("streaming_text_mode", STREAMING_TEXT_MODE_OPTIONS, values["streaming_text_mode"])
+            return
         if field_name == "injection_policy":
             self._set_combo_items("injection_policy", INJECTION_POLICY_OPTIONS, values["injection_policy"])
             return
@@ -964,6 +1002,9 @@ class SettingsWindowController:
             return
         if field_name == "polish_mode":
             self._set_combo_items("polish_mode", POLISH_MODE_OPTIONS, values["polish_mode"])
+            return
+        if field_name == "final_commit_source":
+            self._set_combo_items("final_commit_source", FINAL_COMMIT_SOURCE_OPTIONS, values["final_commit_source"])
             return
         if field_name == "ollama_warmup_enabled":
             self._set_combo_items("ollama_warmup_enabled", WARMUP_OPTIONS, values["ollama_warmup_enabled"])
