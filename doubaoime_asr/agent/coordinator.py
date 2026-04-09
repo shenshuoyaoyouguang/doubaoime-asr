@@ -330,7 +330,10 @@ class VoiceInputCoordinator:
     async def _handle_press(self) -> None:
         """处理热键按下。"""
         self.logger.info("hotkey_down")
-        preflight = await self._asr_preflight.ensure_available(self.config.credential_path)
+        preflight = await self._asr_preflight.ensure_available(
+            self.config.credential_path,
+            auto_rotate_device=self.config.auto_rotate_device
+        )
         if not preflight.ok:
             self.set_status(f"ASR 不可用: {preflight.message or preflight.stage}")
             return

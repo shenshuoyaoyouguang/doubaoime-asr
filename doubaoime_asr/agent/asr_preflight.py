@@ -15,7 +15,7 @@ class ASRPreflightGate:
         self._last_ok_at: float | None = None
         self._last_result: ASRProbeResult | None = None
 
-    async def ensure_available(self, credential_path: str | None) -> ASRProbeResult:
+    async def ensure_available(self, credential_path: str | None, auto_rotate_device: bool = False) -> ASRProbeResult:
         now = time.monotonic()
         if (
             self._last_result is not None
@@ -31,7 +31,10 @@ class ASRPreflightGate:
             return self._last_result
 
         self._logger.info("asr_preflight_started")
-        result = await probe_asr_session(ASRConfig(credential_path=credential_path))
+        result = await probe_asr_session(ASRConfig(
+            credential_path=credential_path,
+            auto_rotate_device=auto_rotate_device
+        ))
         if result.ok:
             self._last_ok_at = now
             self._last_result = result

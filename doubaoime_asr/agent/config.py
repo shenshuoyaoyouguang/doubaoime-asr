@@ -128,6 +128,8 @@ class AgentConfig:
     ollama_warmup_enabled: bool = True
     ollama_keep_alive: str = DEFAULT_OLLAMA_KEEP_ALIVE
     ollama_prompt_template: str = DEFAULT_OLLAMA_PROMPT_TEMPLATE
+    auto_rotate_device: bool = False
+    """每次启动时自动注册新的设备ID，用于规避 ExceededConcurrentQuota 错误"""
 
     @classmethod
     def default_dir(cls) -> Path:

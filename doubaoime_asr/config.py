@@ -72,6 +72,9 @@ class ASRConfig:
         # 使用凭据文件（推荐，首次注册后自动缓存）
         config = ASRConfig(credential_path="~/.config/doubao-asr/credentials.json")
 
+        # 每次启动自动注册新设备（规避并发配额限制）
+        config = ASRConfig(auto_rotate_device=True)
+
         # 凭据文件 + 覆盖部分参数
         config = ASRConfig(
             credential_path="~/.config/doubao-asr/credentials.json",
@@ -87,6 +90,10 @@ class ASRConfig:
     credential_path: Union[str, Path, None] = None
     """
     凭据文件路径
+    """
+    auto_rotate_device: bool = False
+    """
+    每次启动时自动注册新的设备ID，用于规避 ExceededConcurrentQuota 错误
     """
 
     # 这些都是客户端给的默认值，挺通用的。其实我也没尝试过改了服务器会不会认
@@ -159,13 +166,16 @@ class ASRConfig:
         """
         if self._initialized:
             return
-        
+
         # 保存直接通过参数传入的凭据，用于进行覆盖
         user_device_id = self.device_id
         user_token = self.token
 
-        # 尝试从文件中加载凭据
-        file_creds = self._load_credentials_from_file()
+        # 尝试从文件中加载凭据（除非开启了自动轮换）
+        file_creds = None
+        if not self.auto_rotate_device:
+            file_creds = self._load_credentials_from_file()
+
         if file_creds:
             self._credentials = file_creds
             # 使用文件中的值作为默认
@@ -173,28 +183,28 @@ class ASRConfig:
                 self.device_id = file_creds.device_id
             if self.token is None:
                 self.token = file_creds.token
-        
-        # 如果 device_id 仍为 None, 则注册设备
+
+        # 如果 device_id 仍为 None 或者开启了自动轮换，则注册设备
         need_save = False
-        if self.device_id is None:
+        if self.device_id is None or self.auto_rotate_device:
             self._credentials = register_device()
             self.device_id = self._credentials.device_id
-            need_save = True
-        
+            need_save = not self.auto_rotate_device  # 自动轮换时不保存到文件
+
         # 如果 token 仍为 None, 则获取 token
         if self.token is None:
             cdid = self._credentials.cdid if self._credentials else None
             self.token = get_asr_token(self.device_id, cdid)
-        
-        # 如果指定了 credential_path 且有新注册的凭据，则保存至文件
+
+        # 如果指定了 credential_path 且有新注册的凭据且不是自动轮换，则保存至文件
         if self.credential_path and need_save and self._credentials:
             self._credentials.token = self.token
             self._save_credentials_to_file(self._credentials)
-        
+
         # 覆盖用户传入的参数
         if user_device_id is not None:
             self.device_id = user_device_id
-        
+
         if user_token is not None:
             self.token = user_token
 

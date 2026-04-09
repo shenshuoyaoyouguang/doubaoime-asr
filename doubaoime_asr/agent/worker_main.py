@@ -76,6 +76,7 @@ def build_worker_log_path(path_arg: str | None = None) -> Path:
 def add_worker_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--worker-log-path", help=argparse.SUPPRESS)
+    parser.add_argument("--auto-rotate-device", action="store_true", help=argparse.SUPPRESS)
 
 
 class BufferedAudioCapture:
@@ -368,7 +369,8 @@ async def run_worker(args: argparse.Namespace) -> int:
     logger = setup_named_logger(f"doubaoime_asr.agent.worker.{id(log_path)}", log_path)
 
     config = ASRConfig(
-        credential_path=args.credential_path or AgentConfig.default().credential_path
+        credential_path=args.credential_path or AgentConfig.default().credential_path,
+        auto_rotate_device=args.auto_rotate_device
     )
     device = None
     if getattr(args, "mic_device", None):

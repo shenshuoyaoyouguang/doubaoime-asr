@@ -158,7 +158,10 @@ class VoiceInputAgent:
             self._session_active = True
             self.set_status("准备录音…")
 
-            asr_config = ASRConfig(credential_path=self.config.credential_path)
+            asr_config = ASRConfig(
+                credential_path=self.config.credential_path,
+                auto_rotate_device=self.config.auto_rotate_device
+            )
             self._microphone = MicrophoneAudioSource(
                 sample_rate=asr_config.sample_rate,
                 channels=asr_config.channels,

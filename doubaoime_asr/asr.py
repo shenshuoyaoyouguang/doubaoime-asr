@@ -265,67 +265,75 @@ class DoubaoASR:
         )
         bytes_per_frame = samples_per_frame * 2  # 16-bit
 
-        async for chunk in audio_source:
-            if state.is_finished:
-                break
+        try:
+            # 使用超时机制防止迭代器阻塞导致会话泄漏
+            while not state.is_finished:
+                try:
+                    chunk = await asyncio.wait_for(
+                        audio_source.__anext__(),
+                        timeout=self.config.frame_duration_ms * 2 / 1000
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                except StopAsyncIteration:
+                    break
 
-            pcm_buffer += chunk
+                pcm_buffer += chunk
 
-            # 当缓冲区有足够数据时，编码并发送
-            while len(pcm_buffer) >= bytes_per_frame:
-                pcm_frame = pcm_buffer[:bytes_per_frame]
-                pcm_buffer = pcm_buffer[bytes_per_frame:]
+                # 当缓冲区有足够数据时，编码并发送
+                while len(pcm_buffer) >= bytes_per_frame:
+                    pcm_frame = pcm_buffer[:bytes_per_frame]
+                    pcm_buffer = pcm_buffer[bytes_per_frame:]
 
-                # 编码为 Opus
-                opus_frame = self._encoder.encoder.encode(pcm_frame, samples_per_frame)
+                    # 编码为 Opus
+                    opus_frame = self._encoder.encoder.encode(pcm_frame, samples_per_frame)
 
-                # 确定帧状态（实时模式下不知道最后一帧，使用 FIRST/MIDDLE）
-                if frame_index == 0:
-                    frame_state = FrameState.FRAME_STATE_FIRST
-                else:
-                    frame_state = FrameState.FRAME_STATE_MIDDLE
+                    # 确定帧状态（实时模式下不知道最后一帧，使用 FIRST/MIDDLE）
+                    if frame_index == 0:
+                        frame_state = FrameState.FRAME_STATE_FIRST
+                    else:
+                        frame_state = FrameState.FRAME_STATE_MIDDLE
 
-                msg = _build_asr_request(
-                    opus_frame,
-                    state.request_id,
-                    frame_state,
-                    timestamp_ms + frame_index * self.config.frame_duration_ms,
-                )
-                await ws.send(msg)
-                frame_index += 1
+                    msg = _build_asr_request(
+                        opus_frame,
+                        state.request_id,
+                        frame_state,
+                        timestamp_ms + frame_index * self.config.frame_duration_ms,
+                    )
+                    await ws.send(msg)
+                    frame_index += 1
 
-        # 迭代器结束，处理剩余数据
-        if pcm_buffer and not state.is_finished:
-            # 补零到完整帧
-            if len(pcm_buffer) < bytes_per_frame:
-                pcm_buffer += b"\x00" * (bytes_per_frame - len(pcm_buffer))
+        finally:
+            # 【关键修复】无论正常结束还是异常中断，都必须发送结束帧和FinishSession
+            # 否则服务器端会话会泄漏，导致 ExceededConcurrentQuota 错误
+            with contextlib.suppress(Exception):
+                if not state.is_finished and not ws.closed:
+                    if pcm_buffer:
+                        # 处理剩余数据
+                        if len(pcm_buffer) < bytes_per_frame:
+                            pcm_buffer += b"\x00" * (bytes_per_frame - len(pcm_buffer))
+                        opus_frame = self._encoder.encoder.encode(pcm_buffer, samples_per_frame)
+                        msg = _build_asr_request(
+                            opus_frame,
+                            state.request_id,
+                            FrameState.FRAME_STATE_LAST,
+                            timestamp_ms + frame_index * self.config.frame_duration_ms,
+                        )
+                        await ws.send(msg)
+                    elif frame_index > 0:
+                        # 发送空的LAST帧
+                        silent_frame = b"\x00" * bytes_per_frame
+                        opus_frame = self._encoder.encoder.encode(silent_frame, samples_per_frame)
+                        msg = _build_asr_request(
+                            opus_frame,
+                            state.request_id,
+                            FrameState.FRAME_STATE_LAST,
+                            timestamp_ms + frame_index * self.config.frame_duration_ms,
+                        )
+                        await ws.send(msg)
 
-            opus_frame = self._encoder.encoder.encode(pcm_buffer, samples_per_frame)
-
-            msg = _build_asr_request(
-                opus_frame,
-                state.request_id,
-                FrameState.FRAME_STATE_LAST,
-                timestamp_ms + frame_index * self.config.frame_duration_ms,
-            )
-            await ws.send(msg)
-        elif frame_index > 0 and not state.is_finished:
-            # 没有剩余数据，但需要发送一个 LAST 帧标记
-            # 发送一个空的 LAST 帧（静音）
-            silent_frame = b"\x00" * bytes_per_frame
-            opus_frame = self._encoder.encoder.encode(silent_frame, samples_per_frame)
-
-            msg = _build_asr_request(
-                opus_frame,
-                state.request_id,
-                FrameState.FRAME_STATE_LAST,
-                timestamp_ms + frame_index * self.config.frame_duration_ms,
-            )
-            await ws.send(msg)
-
-        # FinishSession
-        if not state.is_finished:
-            await ws.send(_build_finish_session(state.request_id, self.config.get_token()))
+                    # 发送FinishSession，这是最重要的！
+                    await ws.send(_build_finish_session(state.request_id, self.config.get_token()))
     
     async def _initialize_session(self, ws: ClientConnection, state: _SessionState) -> AsyncIterator[ASRResponse]:
         """

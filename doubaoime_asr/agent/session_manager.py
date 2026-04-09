@@ -340,6 +340,8 @@ class SessionManager:
             "--credential-path",
             self.config.credential_path or AgentConfig.default().credential_path or "",
         ]
+        if self.config.auto_rotate_device:
+            args.append("--auto-rotate-device")
         if self.config.microphone_device is not None:
             args.extend(["--mic-device", str(self.config.microphone_device)])
 
