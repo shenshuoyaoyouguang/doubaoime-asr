@@ -25,6 +25,7 @@ from doubaoime_asr.agent.settings_window import (
     validation_banner_message,
     visible_fields_for_page,
 )
+from doubaoime_asr.agent.settings_theme import DEFAULT_SETTINGS_THEME
 
 
 def test_build_config_from_settings_values_updates_runtime_fields():
@@ -304,6 +305,64 @@ def test_build_config_from_settings_values_rejects_invalid_final_commit_source()
 def test_page_heading_reflects_progressive_hierarchy():
     assert page_heading("general") == f"1/{len(PAGE_ORDER)} · 常用"
     assert page_heading("overlay") == f"4/{len(PAGE_ORDER)} · 浮层显示"
+
+
+def test_default_settings_theme_layout_preserves_current_geometry_contract():
+    layout = DEFAULT_SETTINGS_THEME.layout
+
+    assert (layout.window_width, layout.window_height) == (640, 620)
+    assert layout.nav_button_left(0) == layout.margin_left
+    assert layout.nav_button_left(1) == 168
+    assert layout.save_button_left == 518
+    assert layout.hotkey_button_left == 472
+    assert layout.content_top < layout.page_hint_top < layout.action_bar_top
+    assert layout.radius_button_pill == 10
+    assert layout.panel_radius == 12
+
+
+def test_controller_hex_color_helper_accepts_rgb_and_argb():
+    controller = SettingsWindowController(
+        logger=__import__("logging").getLogger("test-settings-window"),
+        get_current_config=AgentConfig,
+        on_save=lambda config: None,
+    )
+
+    assert controller._hex_to_colorref("#17324D") == 0x4D3217
+    assert controller._hex_to_colorref("#B8FFFFFF") == 0xFFFFFF
+
+
+def test_button_visuals_distinguish_primary_secondary_and_active_nav():
+    controller = SettingsWindowController(
+        logger=__import__("logging").getLogger("test-settings-window"),
+        get_current_config=AgentConfig,
+        on_save=lambda config: None,
+    )
+
+    primary = controller._button_visuals("button_primary", is_active_nav=False, is_pressed=False, is_disabled=False)
+    secondary = controller._button_visuals("button_secondary", is_active_nav=False, is_pressed=False, is_disabled=False)
+    active_nav = controller._button_visuals("button_nav", is_active_nav=True, is_pressed=False, is_disabled=False)
+
+    assert primary[0] == DEFAULT_SETTINGS_THEME.palette.accent_primary
+    assert primary[2] == "#FFFFFF"
+    assert secondary[0] == DEFAULT_SETTINGS_THEME.palette.surface_elevated
+    assert active_nav[0] == DEFAULT_SETTINGS_THEME.palette.accent_soft
+    assert active_nav[1] == DEFAULT_SETTINGS_THEME.palette.border_focus
+
+
+def test_banner_visuals_use_semantic_tones():
+    controller = SettingsWindowController(
+        logger=__import__("logging").getLogger("test-settings-window"),
+        get_current_config=AgentConfig,
+        on_save=lambda config: None,
+    )
+
+    info = controller._banner_visuals("info")
+    success = controller._banner_visuals("success")
+    error = controller._banner_visuals("error")
+
+    assert info[1] == DEFAULT_SETTINGS_THEME.palette.border_focus
+    assert success[0] == DEFAULT_SETTINGS_THEME.palette.status_success_fill
+    assert error[2] == DEFAULT_SETTINGS_THEME.palette.status_error
 
 
 def test_page_footer_hint_changes_with_polish_mode_state():

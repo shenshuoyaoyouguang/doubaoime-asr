@@ -40,6 +40,7 @@ from .settings_schema import (
     should_show_ollama_fields,
     visible_fields_for_page,
 )
+from .settings_theme import DEFAULT_SETTINGS_THEME
 from .win_keyboard_hook import SingleKeyRecorder, VK_RCONTROL
 
 
@@ -75,12 +76,19 @@ class SettingsWindowController:
         self._combo_values: dict[str, list[str]] = {}
         self._page_buttons: dict[str, int] = {}
         self._font_handle = None
+        self._theme_fonts: dict[str, int] = {}
+        self._theme_brushes: dict[str, int] = {}
+        self._static_roles: dict[int, str] = {}
+        self._button_roles: dict[int, str] = {}
+        self._button_pages: dict[int, str] = {}
         self._recorder: SingleKeyRecorder | None = None
         self._recording = False
         self._recorded_hotkey_vk = self._config_snapshot.effective_hotkey_vk()
         self._recorded_hotkey_display = self._config_snapshot.effective_hotkey_display()
         self._pending_hotkey_capture: tuple[int, str] | None = None
         self._active_page = "general"
+        self._banner_text = ""
+        self._banner_tone = "info"
         self._header_title_handle: int | None = None
         self._header_subtitle_handle: int | None = None
         self._page_title_handle: int | None = None
@@ -132,6 +140,8 @@ class SettingsWindowController:
         import win32con
         import win32gui
 
+        layout = DEFAULT_SETTINGS_THEME.layout
+
         wndclass = win32gui.WNDCLASS()
         wndclass.hInstance = win32api.GetModuleHandle(None)
         wndclass.lpszClassName = self._class_name
@@ -151,14 +161,16 @@ class SettingsWindowController:
             win32con.WS_OVERLAPPED | win32con.WS_CAPTION | win32con.WS_SYSMENU | win32con.WS_MINIMIZEBOX,
             win32con.CW_USEDEFAULT,
             win32con.CW_USEDEFAULT,
-            640,
-            620,
+            layout.window_width,
+            layout.window_height,
             0,
             0,
             wndclass.hInstance,
             None,
         )
         self._font_handle = ctypes.windll.gdi32.GetStockObject(17)
+        self._create_theme_fonts()
+        self._create_theme_brushes()
         self._create_controls(self._hwnd)
         self._refresh_controls()
         win32gui.ShowWindow(self._hwnd, win32con.SW_SHOWNORMAL)
@@ -215,6 +227,19 @@ class SettingsWindowController:
         elif msg == self.WM_APP_CLOSE:
             win32gui.DestroyWindow(hwnd)
             return 0
+        elif msg == win32con.WM_ERASEBKGND:
+            return 1
+        elif msg == win32con.WM_PAINT:
+            self._paint_background(hwnd)
+            return 0
+        elif msg == win32con.WM_CTLCOLORSTATIC:
+            return self._handle_static_color(wparam, lparam)
+        elif msg == win32con.WM_CTLCOLOREDIT:
+            return self._handle_edit_color(wparam, lparam)
+        elif msg == win32con.WM_CTLCOLORLISTBOX:
+            return self._handle_listbox_color(wparam, lparam)
+        elif msg == win32con.WM_DRAWITEM:
+            return self._handle_draw_item(lparam)
         elif msg == win32con.WM_CLOSE:
             win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
             return 0
@@ -222,6 +247,8 @@ class SettingsWindowController:
             if self._recorder is not None:
                 self._recorder.stop()
                 self._recorder = None
+            self._delete_theme_brushes()
+            self._delete_theme_fonts()
             self._hwnd = None
             win32gui.PostQuitMessage(0)
             return 0
@@ -232,41 +259,48 @@ class SettingsWindowController:
         import win32con
         import win32gui
 
+        layout = DEFAULT_SETTINGS_THEME.layout
+
         self._header_title_handle = win32gui.CreateWindowEx(
             0,
             "STATIC",
             "设置",
             win32con.WS_CHILD | win32con.WS_VISIBLE,
-            24,
-            18,
-            220,
-            24,
+            layout.margin_left,
+            layout.header_title_top,
+            layout.header_title_width,
+            layout.header_title_height,
             hwnd,
             0,
             0,
             None,
         )
         self._set_control_font(self._header_title_handle)
+        self._register_static_role(self._header_title_handle, "header_title")
         self._header_subtitle_handle = win32gui.CreateWindowEx(
             0,
             "STATIC",
             "常用设置在前，高级选项按分区查看。保存后才会真正生效。",
             win32con.WS_CHILD | win32con.WS_VISIBLE,
-            24,
-            44,
-            560,
-            20,
+            layout.margin_left,
+            layout.header_subtitle_top,
+            layout.header_subtitle_width,
+            layout.header_subtitle_height,
             hwnd,
             0,
             0,
             None,
         )
         self._set_control_font(self._header_subtitle_handle)
+        self._register_static_role(self._header_subtitle_handle, "header_subtitle")
 
-        button_x = 24
-        button_width = 136
         for index, page_name in enumerate(PAGE_ORDER):
-            style = win32con.WS_CHILD | win32con.WS_VISIBLE | win32con.WS_TABSTOP | win32con.BS_AUTORADIOBUTTON | win32con.BS_PUSHLIKE
+            style = (
+                win32con.WS_CHILD
+                | win32con.WS_VISIBLE
+                | win32con.WS_TABSTOP
+                | win32con.BS_OWNERDRAW
+            )
             if index == 0:
                 style |= win32con.WS_GROUP
             handle = win32gui.CreateWindowEx(
@@ -274,78 +308,83 @@ class SettingsWindowController:
                 "BUTTON",
                 PAGE_LABELS[page_name],
                 style,
-                button_x + index * (button_width + 8),
-                78,
-                button_width,
-                28,
+                layout.nav_button_left(index),
+                layout.navigation_top,
+                layout.navigation_button_width,
+                layout.navigation_button_height,
                 hwnd,
                 2000 + index,
                 win32api.GetModuleHandle(None),
                 None,
             )
-            self._set_control_font(handle)
+            self._set_role_font(handle, "button_nav")
             self._page_buttons[page_name] = handle
+            self._register_button_role(handle, "button_nav", page_name=page_name)
 
         self._page_title_handle = win32gui.CreateWindowEx(
             0,
             "STATIC",
             "",
             win32con.WS_CHILD | win32con.WS_VISIBLE,
-            24,
-            124,
-            220,
-            22,
+            layout.margin_left,
+            layout.page_title_top,
+            layout.page_title_width,
+            layout.page_title_height,
             hwnd,
             0,
             0,
             None,
         )
         self._set_control_font(self._page_title_handle)
+        self._register_static_role(self._page_title_handle, "page_title")
         self._page_summary_handle = win32gui.CreateWindowEx(
             0,
             "STATIC",
             "",
             win32con.WS_CHILD | win32con.WS_VISIBLE,
-            24,
-            148,
-            580,
-            34,
+            layout.margin_left,
+            layout.page_summary_top,
+            layout.page_summary_width,
+            layout.page_summary_height,
             hwnd,
             0,
             0,
             None,
         )
         self._set_control_font(self._page_summary_handle)
+        self._register_static_role(self._page_summary_handle, "page_summary")
         self._page_hint_handle = win32gui.CreateWindowEx(
             0,
             "STATIC",
             "",
             win32con.WS_CHILD | win32con.WS_VISIBLE,
-            24,
-            520,
-            360,
-            18,
+            layout.margin_left,
+            layout.page_hint_top,
+            layout.page_hint_width,
+            layout.page_hint_height,
             hwnd,
             0,
             0,
             None,
         )
         self._set_control_font(self._page_hint_handle)
+        self._register_static_role(self._page_hint_handle, "page_hint")
         self._banner_handle = win32gui.CreateWindowEx(
             0,
             "STATIC",
             "",
             win32con.WS_CHILD | win32con.WS_VISIBLE,
-            24,
-            112,
-            580,
-            18,
+            layout.margin_left,
+            layout.banner_top,
+            layout.banner_width,
+            layout.banner_height,
             hwnd,
             0,
             0,
             None,
         )
         self._set_control_font(self._banner_handle)
+        self._register_static_role(self._banner_handle, "banner")
 
         for field_name in FIELD_TO_PAGE:
             label_handle = win32gui.CreateWindowEx(
@@ -364,13 +403,14 @@ class SettingsWindowController:
             )
             self._set_control_font(label_handle)
             self._labels[field_name] = label_handle
+            self._register_static_role(label_handle, "field_label")
 
             if field_name == "hotkey_display":
                 handle = win32gui.CreateWindowEx(
-                    win32con.WS_EX_CLIENTEDGE,
+                    win32con.WS_EX_STATICEDGE,
                     "EDIT",
                     "",
-                    win32con.WS_CHILD | win32con.ES_READONLY,
+                    win32con.WS_CHILD | win32con.WS_BORDER | win32con.ES_READONLY,
                     0,
                     0,
                     0,
@@ -384,7 +424,7 @@ class SettingsWindowController:
                     0,
                     "BUTTON",
                     "录制热键",
-                    win32con.WS_CHILD | win32con.WS_TABSTOP,
+                    win32con.WS_CHILD | win32con.WS_TABSTOP | win32con.BS_OWNERDRAW,
                     0,
                     0,
                     0,
@@ -394,13 +434,14 @@ class SettingsWindowController:
                     win32api.GetModuleHandle(None),
                     None,
                 )
-                self._set_control_font(self._record_button_handle)
+                self._set_role_font(self._record_button_handle, "button_tool")
+                self._register_button_role(self._record_button_handle, "button_tool")
             elif field_name in COMBO_FIELD_NAMES:
                 handle = win32gui.CreateWindowEx(
-                    win32con.WS_EX_CLIENTEDGE,
+                    0,
                     "COMBOBOX",
                     "",
-                    win32con.WS_CHILD | win32con.WS_TABSTOP | win32con.CBS_DROPDOWNLIST | win32con.WS_VSCROLL,
+                    win32con.WS_CHILD | win32con.WS_TABSTOP | win32con.WS_BORDER | win32con.CBS_DROPDOWNLIST | win32con.WS_VSCROLL,
                     0,
                     0,
                     0,
@@ -412,10 +453,10 @@ class SettingsWindowController:
                 )
             else:
                 handle = win32gui.CreateWindowEx(
-                    win32con.WS_EX_CLIENTEDGE,
+                    0,
                     "EDIT",
                     "",
-                    win32con.WS_CHILD | win32con.WS_TABSTOP | win32con.ES_AUTOHSCROLL,
+                    win32con.WS_CHILD | win32con.WS_TABSTOP | win32con.WS_BORDER | win32con.ES_AUTOHSCROLL,
                     0,
                     0,
                     0,
@@ -449,6 +490,7 @@ class SettingsWindowController:
             )
             self._set_control_font(help_handle)
             self._help_labels[field_name] = help_handle
+            self._register_static_role(help_handle, "field_help")
             error_handle = win32gui.CreateWindowEx(
                 0,
                 "STATIC",
@@ -465,16 +507,17 @@ class SettingsWindowController:
             )
             self._set_control_font(error_handle)
             self._error_labels[field_name] = error_handle
+            self._register_static_role(error_handle, "field_error")
 
         self._defaults_button_handle = win32gui.CreateWindowEx(
             0,
             "BUTTON",
             "恢复本页默认",
-            win32con.WS_CHILD | win32con.WS_VISIBLE | win32con.WS_TABSTOP,
-            24,
-            540,
-            116,
-            28,
+            win32con.WS_CHILD | win32con.WS_VISIBLE | win32con.WS_TABSTOP | win32con.BS_OWNERDRAW,
+            layout.margin_left,
+            layout.action_bar_top,
+            layout.default_button_width,
+            layout.button_height,
             hwnd,
             1004,
             win32api.GetModuleHandle(None),
@@ -484,11 +527,11 @@ class SettingsWindowController:
             0,
             "BUTTON",
             "预览浮层",
-            win32con.WS_CHILD | win32con.WS_VISIBLE | win32con.WS_TABSTOP,
-            152,
-            540,
-            104,
-            28,
+            win32con.WS_CHILD | win32con.WS_VISIBLE | win32con.WS_TABSTOP | win32con.BS_OWNERDRAW,
+            layout.preview_button_left,
+            layout.action_bar_top,
+            layout.preview_button_width,
+            layout.button_height,
             hwnd,
             1005,
             win32api.GetModuleHandle(None),
@@ -498,11 +541,11 @@ class SettingsWindowController:
             0,
             "BUTTON",
             "取消",
-            win32con.WS_CHILD | win32con.WS_VISIBLE | win32con.WS_TABSTOP,
-            418,
-            540,
-            90,
-            28,
+            win32con.WS_CHILD | win32con.WS_VISIBLE | win32con.WS_TABSTOP | win32con.BS_OWNERDRAW,
+            layout.cancel_button_left,
+            layout.action_bar_top,
+            layout.action_button_width,
+            layout.button_height,
             hwnd,
             1002,
             win32api.GetModuleHandle(None),
@@ -512,11 +555,11 @@ class SettingsWindowController:
             0,
             "BUTTON",
             "保存",
-            win32con.WS_CHILD | win32con.WS_VISIBLE | win32con.WS_TABSTOP | win32con.BS_DEFPUSHBUTTON,
-            518,
-            540,
-            90,
-            28,
+            win32con.WS_CHILD | win32con.WS_VISIBLE | win32con.WS_TABSTOP | win32con.BS_OWNERDRAW,
+            layout.save_button_left,
+            layout.action_bar_top,
+            layout.action_button_width,
+            layout.button_height,
             hwnd,
             1001,
             win32api.GetModuleHandle(None),
@@ -528,13 +571,17 @@ class SettingsWindowController:
             self._cancel_button_handle,
             self._save_button_handle,
         ):
-            self._set_control_font(handle)
+            self._set_role_font(handle, "button_action")
+        self._register_button_role(self._defaults_button_handle, "button_tool")
+        self._register_button_role(self._preview_button_handle, "button_tool")
+        self._register_button_role(self._cancel_button_handle, "button_secondary")
+        self._register_button_role(self._save_button_handle, "button_primary")
 
     def _refresh_controls(self) -> None:
         with self._lock:
             config = replace(self._config_snapshot)
 
-        self._set_banner_text("")
+        self._set_banner_text("", tone="info")
         self._clear_field_errors()
         for field_name in FIELD_TO_PAGE:
             self._set_field_value_from_config(field_name, config)
@@ -611,19 +658,14 @@ class SettingsWindowController:
             win32gui.SetWindowText(self._page_hint_handle, page_footer_hint(page_name, self._current_polish_mode()))
         self._layout_active_page()
         self._update_action_buttons()
+        self._invalidate_window()
 
     def _layout_active_page(self) -> None:
         import win32con
         import win32gui
 
-        label_x = 28
-        label_width = 170
-        field_x = 212
-        field_width = 372
-        y = 198
-        row_gap = 54
-        edit_height = 24
-        combo_height = 220
+        layout = DEFAULT_SETTINGS_THEME.layout
+        y = layout.content_top
 
         for field_name in FIELD_TO_PAGE:
             win32gui.ShowWindow(self._labels[field_name], win32con.SW_HIDE)
@@ -638,35 +680,70 @@ class SettingsWindowController:
             label_handle = self._labels[field_name]
             control_handle = self._controls[field_name]
             help_handle = self._help_labels[field_name]
-            win32gui.MoveWindow(label_handle, label_x, y + 4, label_width, edit_height, True)
+            win32gui.MoveWindow(
+                label_handle,
+                layout.label_x,
+                y + layout.label_text_offset_y,
+                layout.label_width,
+                layout.control_height,
+                True,
+            )
             win32gui.ShowWindow(label_handle, win32con.SW_SHOW)
 
             if field_name == "hotkey_display":
-                win32gui.MoveWindow(control_handle, field_x, y, 248, edit_height, True)
+                win32gui.MoveWindow(control_handle, layout.field_x, y, layout.hotkey_field_width, layout.control_height, True)
                 win32gui.ShowWindow(control_handle, win32con.SW_SHOW)
                 if self._record_button_handle is not None:
-                    win32gui.MoveWindow(self._record_button_handle, field_x + 260, y, 112, edit_height, True)
+                    win32gui.MoveWindow(
+                        self._record_button_handle,
+                        layout.hotkey_button_left,
+                        y,
+                        layout.hotkey_button_width,
+                        layout.control_height,
+                        True,
+                    )
                     win32gui.ShowWindow(self._record_button_handle, win32con.SW_SHOW)
             elif field_name in COMBO_FIELD_NAMES:
-                win32gui.MoveWindow(control_handle, field_x, y, field_width, combo_height, True)
+                win32gui.MoveWindow(control_handle, layout.field_x, y, layout.field_width, layout.combo_height, True)
                 win32gui.ShowWindow(control_handle, win32con.SW_SHOW)
             else:
-                win32gui.MoveWindow(control_handle, field_x, y, field_width, edit_height, True)
+                win32gui.MoveWindow(control_handle, layout.field_x, y, layout.field_width, layout.control_height, True)
                 win32gui.ShowWindow(control_handle, win32con.SW_SHOW)
 
             help_text = FIELD_HELP_TEXT.get(field_name, "")
             error_text = self._field_errors.get(field_name, "")
             if error_text:
-                win32gui.MoveWindow(help_handle, field_x, y + 26, field_width, 18, True)
+                win32gui.MoveWindow(
+                    help_handle,
+                    layout.field_x,
+                    y + layout.help_text_offset_y,
+                    layout.field_width,
+                    layout.page_hint_height,
+                    True,
+                )
                 win32gui.ShowWindow(help_handle, win32con.SW_HIDE)
                 error_handle = self._error_labels[field_name]
                 win32gui.SetWindowText(error_handle, error_text)
-                win32gui.MoveWindow(error_handle, field_x, y + 26, field_width, 18, True)
+                win32gui.MoveWindow(
+                    error_handle,
+                    layout.field_x,
+                    y + layout.help_text_offset_y,
+                    layout.field_width,
+                    layout.page_hint_height,
+                    True,
+                )
                 win32gui.ShowWindow(error_handle, win32con.SW_SHOW)
             elif help_text:
-                win32gui.MoveWindow(help_handle, field_x, y + 26, field_width, 18, True)
+                win32gui.MoveWindow(
+                    help_handle,
+                    layout.field_x,
+                    y + layout.help_text_offset_y,
+                    layout.field_width,
+                    layout.page_hint_height,
+                    True,
+                )
                 win32gui.ShowWindow(help_handle, win32con.SW_SHOW)
-            y += row_gap
+            y += layout.row_gap
 
     def _update_action_buttons(self) -> None:
         import win32con
@@ -700,7 +777,7 @@ class SettingsWindowController:
         self._clear_field_errors()
         for field_name in PAGE_FIELDS[self._active_page]:
             self._set_field_value_from_config(field_name, defaults)
-        self._set_banner_text(restore_banner_message(self._active_page))
+        self._set_banner_text(restore_banner_message(self._active_page), tone="success")
         self._activate_page(self._active_page)
 
     def _save_from_controls(self, hwnd: int) -> None:
@@ -714,7 +791,7 @@ class SettingsWindowController:
             return
 
         self._logger.info("settings_window_saved config=%s", next_config)
-        self._set_banner_text("设置已提交，保存后会立即生效。")
+        self._set_banner_text("设置已提交，保存后会立即生效。", tone="success")
         self._on_save(next_config)
         with self._lock:
             self._config_snapshot = replace(next_config)
@@ -732,11 +809,11 @@ class SettingsWindowController:
             self._handle_validation_error(hwnd, exc)
             return
         try:
-            self._set_banner_text(preview_banner_message())
+            self._set_banner_text(preview_banner_message(), tone="info")
             self._on_preview(preview_config)
         except Exception:
             self._logger.exception("settings_preview_dispatch_failed")
-            self._set_banner_text("预览失败，请查看日志。")
+            self._set_banner_text("预览失败，请查看日志。", tone="error")
             win32gui.MessageBox(hwnd, "预览失败，请查看日志。", "预览失败", win32con.MB_OK | win32con.MB_ICONERROR)
 
     def _build_config_from_controls(self) -> AgentConfig:
@@ -750,7 +827,7 @@ class SettingsWindowController:
 
         self._clear_field_errors()
         self._set_field_error(exc)
-        self._set_banner_text(validation_banner_message(exc))
+        self._set_banner_text(validation_banner_message(exc), tone="error")
         self._focus_field(exc.field_name)
         win32gui.MessageBox(hwnd, str(exc), "设置无效", win32con.MB_OK | win32con.MB_ICONERROR)
 
@@ -767,11 +844,14 @@ class SettingsWindowController:
         if handle:
             win32gui.SetFocus(handle)
 
-    def _set_banner_text(self, text: str) -> None:
+    def _set_banner_text(self, text: str, *, tone: str = "info") -> None:
         import win32gui
 
+        self._banner_text = text
+        self._banner_tone = tone
         if self._banner_handle is not None:
             win32gui.SetWindowText(self._banner_handle, text)
+        self._invalidate_window()
 
     def _clear_field_errors(self) -> None:
         self._field_errors.clear()
@@ -803,6 +883,378 @@ class SettingsWindowController:
 
         if self._font_handle:
             ctypes.windll.user32.SendMessageW(handle, 0x0030, self._font_handle, 1)
+
+    def _set_role_font(self, handle: int, role: str) -> None:
+        import ctypes
+
+        themed_font = self._theme_fonts.get(role)
+        if themed_font:
+            ctypes.windll.user32.SendMessageW(handle, 0x0030, themed_font, 1)
+            return
+        self._set_control_font(handle)
+
+    def _register_static_role(self, handle: int | None, role: str) -> None:
+        if handle is None:
+            return
+        self._static_roles[handle] = role
+        self._set_role_font(handle, role)
+
+    def _create_theme_fonts(self) -> None:
+        import ctypes
+
+        typography = DEFAULT_SETTINGS_THEME.typography
+        gdi32 = ctypes.windll.gdi32
+        user32 = ctypes.windll.user32
+        hdc = user32.GetDC(0)
+        try:
+            dpi_y = gdi32.GetDeviceCaps(hdc, 90) or 96
+        finally:
+            user32.ReleaseDC(0, hdc)
+
+        def create_font(point_size: int, *, weight: int = 400) -> int:
+            height = -int(point_size * dpi_y / 72)
+            return gdi32.CreateFontW(
+                height,
+                0,
+                0,
+                0,
+                weight,
+                0,
+                0,
+                0,
+                134,
+                0,
+                0,
+                5,
+                0,
+                "Microsoft YaHei UI",
+            )
+
+        self._theme_fonts = {
+            "header_title": create_font(typography.window_title_size, weight=600),
+            "page_title": create_font(typography.page_title_size, weight=600),
+            "header_subtitle": create_font(typography.help_text_size),
+            "page_summary": create_font(typography.help_text_size),
+            "page_hint": create_font(typography.help_text_size),
+            "banner": create_font(typography.banner_text_size, weight=500),
+            "field_label": create_font(typography.label_size, weight=500),
+            "field_help": create_font(typography.help_text_size),
+            "field_error": create_font(typography.help_text_size, weight=500),
+            "button_nav": create_font(typography.help_text_size, weight=500),
+            "button_action": create_font(typography.help_text_size, weight=500),
+            "button_tool": create_font(typography.help_text_size, weight=500),
+        }
+
+    def _delete_theme_fonts(self) -> None:
+        import ctypes
+
+        for handle in self._theme_fonts.values():
+            if handle:
+                ctypes.windll.gdi32.DeleteObject(handle)
+        self._theme_fonts.clear()
+
+    def _create_theme_brushes(self) -> None:
+        import ctypes
+
+        palette = DEFAULT_SETTINGS_THEME.palette
+        self._theme_brushes = {
+            "panel": ctypes.windll.gdi32.CreateSolidBrush(self._hex_to_colorref(palette.panel_background)),
+            "control": ctypes.windll.gdi32.CreateSolidBrush(self._hex_to_colorref(palette.surface_card)),
+            "control_readonly": ctypes.windll.gdi32.CreateSolidBrush(self._hex_to_colorref("#F2F7FC")),
+            "listbox": ctypes.windll.gdi32.CreateSolidBrush(self._hex_to_colorref(palette.surface_elevated)),
+        }
+
+    def _delete_theme_brushes(self) -> None:
+        import ctypes
+
+        for handle in self._theme_brushes.values():
+            if handle:
+                ctypes.windll.gdi32.DeleteObject(handle)
+        self._theme_brushes.clear()
+
+    def _invalidate_window(self) -> None:
+        import win32gui
+
+        if self._hwnd:
+            win32gui.InvalidateRect(self._hwnd, None, True)
+
+    def _paint_background(self, hwnd: int) -> None:
+        import win32gui
+
+        layout = DEFAULT_SETTINGS_THEME.layout
+        palette = DEFAULT_SETTINGS_THEME.palette
+        paint_struct = win32gui.BeginPaint(hwnd)
+        try:
+            hdc = paint_struct[0]
+            left, top, right, bottom = win32gui.GetClientRect(hwnd)
+            self._fill_rect(hdc, (left, top, right, bottom), palette.app_background)
+            header_rect = (
+                layout.panel_inset,
+                layout.panel_inset,
+                right - layout.panel_inset,
+                layout.navigation_top + layout.navigation_button_height + 22,
+            )
+            content_rect = (
+                layout.panel_inset,
+                layout.banner_top - 10,
+                right - layout.panel_inset,
+                layout.page_hint_top + 26,
+            )
+            action_rect = (
+                layout.panel_inset,
+                layout.action_bar_top - 12,
+                right - layout.panel_inset,
+                bottom - layout.panel_inset,
+            )
+
+            self._fill_round_rect(hdc, header_rect, palette.surface_elevated, palette.divider_subtle, layout.panel_radius)
+            self._fill_round_rect(hdc, content_rect, palette.card_background, palette.divider_subtle, layout.panel_radius)
+            self._fill_round_rect(hdc, action_rect, palette.surface_elevated, palette.divider_subtle, layout.panel_radius)
+            self._fill_rect(
+                hdc,
+                (layout.margin_left, layout.page_summary_top + layout.page_summary_height + 8, right - layout.margin_left, layout.page_summary_top + layout.page_summary_height + 9),
+                palette.divider_subtle,
+            )
+            self._fill_rect(
+                hdc,
+                (layout.margin_left, layout.action_bar_top - 14, right - layout.margin_left, layout.action_bar_top - 13),
+                palette.divider_subtle,
+            )
+
+            if self._banner_text:
+                banner_fill, banner_border, _ = self._banner_visuals(self._banner_tone)
+                self._fill_round_rect(
+                    hdc,
+                    (
+                        layout.margin_left - 2,
+                        layout.banner_top - 2,
+                        layout.margin_left + layout.banner_width,
+                        layout.banner_top + layout.banner_height + 4,
+                    ),
+                    banner_fill,
+                    banner_border,
+                    layout.banner_radius,
+                )
+        finally:
+            win32gui.EndPaint(hwnd, paint_struct[1])
+
+    def _handle_static_color(self, hdc: int, handle: int) -> int:
+        import ctypes
+
+        palette = DEFAULT_SETTINGS_THEME.palette
+        role = self._static_roles.get(handle, "")
+        text_color = {
+            "header_title": palette.text_primary,
+            "page_title": palette.text_primary,
+            "field_label": palette.text_primary,
+            "header_subtitle": palette.text_secondary,
+            "page_summary": palette.text_secondary,
+            "banner": self._banner_visuals(self._banner_tone)[2],
+            "page_hint": palette.text_muted,
+            "field_help": palette.text_muted,
+            "field_error": palette.status_error,
+        }.get(role, palette.text_primary)
+        ctypes.windll.gdi32.SetTextColor(hdc, self._hex_to_colorref(text_color))
+        ctypes.windll.gdi32.SetBkMode(hdc, 1)
+        return ctypes.windll.gdi32.GetStockObject(5)
+
+    def _handle_edit_color(self, hdc: int, handle: int) -> int:
+        import ctypes
+
+        palette = DEFAULT_SETTINGS_THEME.palette
+        read_only_handle = self._controls.get("hotkey_display")
+        is_read_only = handle == read_only_handle
+        ctypes.windll.gdi32.SetTextColor(hdc, self._hex_to_colorref(palette.text_primary))
+        ctypes.windll.gdi32.SetBkColor(
+            hdc,
+            self._hex_to_colorref("#F2F7FC" if is_read_only else "#FBFDFF"),
+        )
+        return self._theme_brushes["control_readonly" if is_read_only else "control"]
+
+    def _handle_listbox_color(self, hdc: int, _handle: int) -> int:
+        import ctypes
+
+        palette = DEFAULT_SETTINGS_THEME.palette
+        ctypes.windll.gdi32.SetTextColor(hdc, self._hex_to_colorref(palette.text_primary))
+        ctypes.windll.gdi32.SetBkColor(hdc, self._hex_to_colorref("#FBFDFF"))
+        return self._theme_brushes["listbox"]
+
+    def _register_button_role(self, handle: int | None, role: str, *, page_name: str | None = None) -> None:
+        if handle is None:
+            return
+        self._button_roles[handle] = role
+        if page_name is not None:
+            self._button_pages[handle] = page_name
+
+    def _handle_draw_item(self, lparam: int) -> int:
+        import ctypes
+        import win32con
+        import win32gui
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        class DRAWITEMSTRUCT(ctypes.Structure):
+            _fields_ = [
+                ("CtlType", ctypes.c_uint),
+                ("CtlID", ctypes.c_uint),
+                ("itemID", ctypes.c_uint),
+                ("itemAction", ctypes.c_uint),
+                ("itemState", ctypes.c_uint),
+                ("hwndItem", ctypes.c_void_p),
+                ("hDC", ctypes.c_void_p),
+                ("rcItem", RECT),
+                ("itemData", ctypes.c_void_p),
+            ]
+
+        draw_item = DRAWITEMSTRUCT.from_address(lparam)
+        if draw_item.CtlType != win32con.ODT_BUTTON:
+            return 0
+
+        button_handle = int(draw_item.hwndItem)
+        role = self._button_roles.get(button_handle)
+        if role is None:
+            return 0
+
+        palette = DEFAULT_SETTINGS_THEME.palette
+        item_state = draw_item.itemState
+        page_name = self._button_pages.get(button_handle)
+        is_active_nav = role == "button_nav" and page_name == self._active_page
+        is_pressed = bool(item_state & win32con.ODS_SELECTED)
+        is_disabled = bool(item_state & win32con.ODS_DISABLED)
+        is_focused = bool(item_state & win32con.ODS_FOCUS)
+
+        fill_color, border_color, text_color = self._button_visuals(
+            role,
+            is_active_nav=is_active_nav,
+            is_pressed=is_pressed,
+            is_disabled=is_disabled,
+        )
+        radius = DEFAULT_SETTINGS_THEME.layout.radius_button_pill
+        rect = (
+            draw_item.rcItem.left,
+            draw_item.rcItem.top,
+            draw_item.rcItem.right,
+            draw_item.rcItem.bottom,
+        )
+        self._fill_round_rect(draw_item.hDC, rect, fill_color, border_color, radius)
+        self._draw_button_text(draw_item.hDC, button_handle, rect, text_color)
+
+        if is_focused:
+            focus_rect = (rect[0] + 3, rect[1] + 3, rect[2] - 3, rect[3] - 3)
+            win32gui.DrawFocusRect(draw_item.hDC, focus_rect)
+        return 1
+
+    def _button_visuals(
+        self,
+        role: str,
+        *,
+        is_active_nav: bool,
+        is_pressed: bool,
+        is_disabled: bool,
+    ) -> tuple[str, str, str]:
+        palette = DEFAULT_SETTINGS_THEME.palette
+        if is_disabled:
+            return "#EEF3F8", palette.border_subtle, palette.text_muted
+        if role == "button_primary":
+            if is_pressed:
+                return palette.accent_pressed, palette.accent_pressed, "#FFFFFF"
+            return palette.accent_primary, palette.accent_primary, "#FFFFFF"
+        if role == "button_secondary":
+            if is_pressed:
+                return "#EAF1F8", palette.border_focus, palette.text_primary
+            return palette.surface_elevated, palette.border_subtle, palette.text_primary
+        if role == "button_tool":
+            if is_pressed:
+                return "#EAF1F8", palette.border_focus, palette.text_primary
+            return palette.surface_card, palette.divider_subtle, palette.text_secondary
+        if role == "button_nav":
+            if is_active_nav:
+                return palette.accent_soft if not is_pressed else "#DCEBFF", palette.border_focus, palette.accent_pressed
+            if is_pressed:
+                return "#EEF4FA", palette.border_subtle, palette.text_primary
+            return palette.surface_elevated, palette.divider_subtle, palette.text_secondary
+        return palette.surface_elevated, palette.border_subtle, palette.text_primary
+
+    def _banner_visuals(self, tone: str) -> tuple[str, str, str]:
+        palette = DEFAULT_SETTINGS_THEME.palette
+        if tone == "success":
+            return palette.status_success_fill, palette.status_success_border, palette.status_success
+        if tone == "error":
+            return palette.status_error_fill, palette.status_error_border, palette.status_error
+        return palette.status_info_fill, palette.border_focus, palette.status_info
+
+    def _fill_round_rect(self, hdc: int, rect: tuple[int, int, int, int], fill_color: str, border_color: str, radius: int) -> None:
+        import ctypes
+
+        gdi32 = ctypes.windll.gdi32
+        old_pen = gdi32.SelectObject(hdc, gdi32.CreatePen(0, 1, self._hex_to_colorref(border_color)))
+        old_brush = gdi32.SelectObject(hdc, gdi32.CreateSolidBrush(self._hex_to_colorref(fill_color)))
+        try:
+            gdi32.RoundRect(hdc, rect[0], rect[1], rect[2], rect[3], radius, radius)
+        finally:
+            pen = gdi32.SelectObject(hdc, old_pen)
+            brush = gdi32.SelectObject(hdc, old_brush)
+            gdi32.DeleteObject(pen)
+            gdi32.DeleteObject(brush)
+
+    def _draw_button_text(self, hdc: int, handle: int, rect: tuple[int, int, int, int], text_color: str) -> None:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+        button_text = user32.GetWindowTextLengthW(handle)
+        buffer = ctypes.create_unicode_buffer(button_text + 1)
+        user32.GetWindowTextW(handle, buffer, button_text + 1)
+        old_font = gdi32.SelectObject(hdc, self._theme_fonts.get(self._button_roles.get(handle, ""), self._font_handle))
+        gdi32.SetTextColor(hdc, self._hex_to_colorref(text_color))
+        gdi32.SetBkMode(hdc, 1)
+        draw_rect = self._rect(rect)
+        user32.DrawTextW(hdc, buffer, -1, ctypes.byref(draw_rect), 0x00000001 | 0x00000004 | 0x00000020)
+        gdi32.SelectObject(hdc, old_font)
+
+    def _fill_rect(self, hdc: int, rect: tuple[int, int, int, int], color: str) -> None:
+        import ctypes
+
+        brush = ctypes.windll.gdi32.CreateSolidBrush(self._hex_to_colorref(color))
+        ctypes.windll.user32.FillRect(hdc, ctypes.byref(self._rect(rect)), brush)
+        ctypes.windll.gdi32.DeleteObject(brush)
+
+    def _stroke_rect(self, hdc: int, rect: tuple[int, int, int, int], color: str) -> None:
+        left, top, right, bottom = rect
+        self._fill_rect(hdc, (left, top, right, top + 1), color)
+        self._fill_rect(hdc, (left, bottom - 1, right, bottom), color)
+        self._fill_rect(hdc, (left, top, left + 1, bottom), color)
+        self._fill_rect(hdc, (right - 1, top, right, bottom), color)
+
+    def _rect(self, rect: tuple[int, int, int, int]):
+        import ctypes
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        return RECT(*rect)
+
+    def _hex_to_colorref(self, value: str) -> int:
+        normalized = value.lstrip("#")
+        if len(normalized) == 8:
+            normalized = normalized[-6:]
+        if len(normalized) != 6:
+            raise ValueError(f"unsupported color value: {value}")
+        red = int(normalized[0:2], 16)
+        green = int(normalized[2:4], 16)
+        blue = int(normalized[4:6], 16)
+        return red | (green << 8) | (blue << 16)
 
     def _start_hotkey_recording(self, hwnd: int) -> None:
         import win32gui
