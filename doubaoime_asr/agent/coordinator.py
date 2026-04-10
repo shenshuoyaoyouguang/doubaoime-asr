@@ -36,6 +36,7 @@ from .events import (
     AudioLevelEvent,
     ConfigChangeEvent,
     ErrorEvent,
+    FallbackRequiredEvent,
     FinalResultEvent,
     FinishedEvent,
     HotkeyPressEvent,
@@ -49,6 +50,7 @@ from .events import (
     WorkerExitEvent,
     WorkerReadyEvent,
     WorkerStatusEvent,
+    ServiceResolvedFinalEvent,
     parse_worker_event,
 )
 from .asr_preflight import ASRPreflightGate
@@ -60,7 +62,9 @@ from .input_injector import FocusChangedError, FocusTarget
 from .overlay_service import OverlayService
 from .runtime_logging import setup_named_logger
 from .session_manager import Mode, SessionManager, WorkerSession, WorkerSessionState
+from .service_session_manager import ServiceSessionManager
 from .text_polisher import PolishResult, TextPolisher
+from .tip_gateway import NullTipGateway, TipGateway, TipGatewayResult
 from .transcript_utils import TranscriptAccumulator, concat_transcript_text
 from .win_audio_output import AudioOutputMuteError, SystemOutputMuteGuard
 from .win_hotkey import normalize_hotkey, vk_from_hotkey, vk_to_display, vk_to_hotkey
@@ -96,6 +100,7 @@ class VoiceInputCoordinator:
         enable_tray: bool = True,
         console: bool = False,
         launch_args: list[str] | None = None,
+        tip_gateway: TipGateway | None = None,
     ) -> None:
         self.config = config
         self.mode = mode or config.mode
@@ -125,9 +130,16 @@ class VoiceInputCoordinator:
         self._preview_lock = threading.Lock()
         self._preview_counter = 0
         self._transcript = TranscriptAccumulator()
+        self._tip_gateway: TipGateway = tip_gateway or NullTipGateway()
+        self._tip_session_id: str | None = None
+        self._tip_primary_active = False
+        self._pending_service_resolved_final: ServiceResolvedFinalEvent | None = None
+        self._pending_service_fallback_reason: str | None = None
 
         # 初始化 Services
-        self.session_manager = SessionManager(
+        session_backend = os.environ.get("DOUBAO_AGENT_SESSION_BACKEND", "").strip().lower()
+        session_manager_cls = ServiceSessionManager if session_backend == "service" else SessionManager
+        self.session_manager = session_manager_cls(
             config,
             self.logger,
             on_event=self._forward_session_manager_event,
@@ -367,6 +379,23 @@ class VoiceInputCoordinator:
         else:
             self.logger.info("inject_skipped reason=recognize_mode phase=session_start")
 
+        self._tip_session_id = None
+        self._tip_primary_active = False
+        self._pending_service_resolved_final = None
+        self._pending_service_fallback_reason = None
+        if self.mode == "inject" and self._tip_gateway.is_available():
+            tip_result = await self._tip_gateway.begin_session(session_id=str(session.session_id), target=target)
+            if tip_result.success:
+                self._tip_session_id = str(session.session_id)
+                self._tip_primary_active = True
+                self.logger.info("tip_primary_engaged session_id=%s", self._tip_session_id)
+            else:
+                self.logger.info(
+                    "tip_failure session_id=%s phase=begin_session reason=%s",
+                    session.session_id,
+                    tip_result.reason,
+                )
+
         # 开始会话
         self.session_manager.begin_session(target, self.mode)
         composition = self.injection_service.begin_session(
@@ -388,6 +417,8 @@ class VoiceInputCoordinator:
         try:
             await self.session_manager.send_command("START")
         except Exception:
+            if self._tip_primary_active:
+                await self._cancel_tip_session("worker_start_failed")
             self.session_manager.clear_session()
             await self._close_interim_dispatcher()
             self.injection_service.end_session()
@@ -474,6 +505,13 @@ class VoiceInputCoordinator:
             text = self._record_session_text(event, event.text, is_final=False)
             if self.console:
                 print(f"\r[识别中] {text}", end="", flush=True)
+            if self._tip_primary_active and self._tip_session_id is not None:
+                tip_result = await self._tip_gateway.submit_interim(session_id=self._tip_session_id, text=text)
+                if tip_result.success:
+                    self.logger.info("tip_interim_applied session_id=%s", self._tip_session_id)
+                    self.set_status(f"识别中: {text[-24:]}")
+                    return
+                await self._activate_tip_fallback(reason=tip_result.reason or "tip_interim_failed")
             seq = await self._submit_interim_snapshot(text)
             self.logger.info(
                 "interim_snapshot_queued seq=%s segment_index=%s len=%s digest=%s inline_enabled=%s text_profile=%s",
@@ -500,28 +538,52 @@ class VoiceInputCoordinator:
                 self.injection_service.is_inline_streaming_enabled(),
                 self._current_target_profile(),
             )
-            await self.overlay_service.submit_final(raw_text, kind="final_raw")
-            await self.injection_service.prepare_final_text(raw_text)
+            if not self._tip_primary_active:
+                await self.overlay_service.submit_final(raw_text, kind="final_raw")
+                await self.injection_service.prepare_final_text(raw_text)
             if not session.stop_sent:
                 self.set_status(f"识别中: {raw_text[-24:]}")
 
         elif isinstance(event, ErrorEvent):
             self._asr_preflight.invalidate()
+            if self._tip_primary_active:
+                await self._cancel_tip_session("worker_error")
             await self.overlay_service.hide("error")
             self.set_status(f"识别失败: {event.message}")
             await self._clear_active_session()
+
+        elif isinstance(event, ServiceResolvedFinalEvent):
+            self._pending_service_resolved_final = event
+
+        elif isinstance(event, FallbackRequiredEvent):
+            self._pending_service_fallback_reason = event.reason or None
 
         elif isinstance(event, FinishedEvent):
             self._finished_event_started_at = time.perf_counter()
             await self._flush_interim_dispatcher(reason="finished")
             raw_text = self._aggregate_session_text()
             if raw_text:
-                if raw_text != self._last_displayed_raw_final_text:
+                if raw_text != self._last_displayed_raw_final_text and not self._tip_primary_active:
                     await self.overlay_service.submit_final(raw_text, kind="final_raw")
                     self._last_displayed_raw_final_text = raw_text
                 if session.mode == "inject":
                     self.set_status("正在准备上屏…")
-                if self.config.polish_mode == POLISH_MODE_OFF:
+                if self._pending_service_resolved_final is not None:
+                    service_final = self._pending_service_resolved_final
+                    fallback_reason = service_final.fallback_reason or self._pending_service_fallback_reason
+                    result = PolishResult(
+                        text=service_final.text or raw_text,
+                        applied_mode=service_final.applied_mode or POLISH_MODE_OFF,
+                        latency_ms=0,
+                        fallback_reason=fallback_reason,
+                    )
+                    self.logger.info(
+                        "service_final_resolved_applied raw_digest=%s resolved_digest=%s committed_source=%s",
+                        self._text_digest(raw_text),
+                        self._text_digest(result.text),
+                        service_final.committed_source,
+                    )
+                elif self.config.polish_mode == POLISH_MODE_OFF:
                     result = PolishResult(text=raw_text, applied_mode=POLISH_MODE_OFF, latency_ms=0)
                     self.logger.info(
                         "final_text_resolved mode=%s latency_ms=%d raw_digest=%s resolved_digest=%s resolved_source=%s",
@@ -554,7 +616,36 @@ class VoiceInputCoordinator:
                 )
                 if self.console:
                     print(f"\r[最终] {committed_text}          ", flush=True)
-                await self._inject_final(committed_text)
+                if (
+                    self._tip_primary_active
+                    and self._tip_session_id is not None
+                    and result.fallback_reason is None
+                ):
+                    tip_result = await self._tip_gateway.commit_resolved_final(
+                        session_id=self._tip_session_id,
+                        text=committed_text,
+                    )
+                    if tip_result.success:
+                        self.logger.info(
+                            "tip_success session_id=%s committed_digest=%s",
+                            self._tip_session_id,
+                            self._text_digest(committed_text),
+                        )
+                    else:
+                        fallback_ready = await self._activate_tip_fallback(
+                            reason=tip_result.reason or ("tip_timeout" if tip_result.timeout else "tip_failure")
+                        )
+                        if fallback_ready:
+                            await self._inject_final(committed_text)
+                else:
+                    if self._tip_primary_active:
+                        fallback_ready = await self._activate_tip_fallback(
+                            reason=result.fallback_reason or "tip_commit_unavailable"
+                        )
+                        if fallback_ready:
+                            await self._inject_final(committed_text)
+                    else:
+                        await self._inject_final(committed_text)
             await self.overlay_service.hide("finished")
             if not raw_text and not self._status.startswith("识别失败"):
                 self.set_status("空闲")
@@ -729,6 +820,8 @@ class VoiceInputCoordinator:
             return
 
         self.logger.info("worker_exit code=%s", exit_code)
+        if self._tip_primary_active:
+            await self._cancel_tip_session("worker_exit")
         if not self._stopping and exit_code != 0 and not self._status.startswith("识别失败"):
             self.set_status(f"识别进程异常退出: {exit_code}")
 
@@ -752,6 +845,10 @@ class VoiceInputCoordinator:
         await self._close_interim_dispatcher()
         self.session_manager.clear_session()
         self.injection_service.end_session()
+        self._tip_session_id = None
+        self._tip_primary_active = False
+        self._pending_service_resolved_final = None
+        self._pending_service_fallback_reason = None
         restore_warning = self._release_capture_output()
         if restore_warning is not None:
             self.set_status(restore_warning)
@@ -762,6 +859,47 @@ class VoiceInputCoordinator:
         if self._pending_polisher_warmup:
             self._pending_polisher_warmup = False
             self._schedule_polisher_warmup("after_session")
+
+    async def _cancel_tip_session(self, reason: str) -> TipGatewayResult:
+        if not self._tip_primary_active or self._tip_session_id is None:
+            return TipGatewayResult(success=False, reason="tip_not_active", cleanup_performed=False)
+        result = await self._tip_gateway.cancel_session(session_id=self._tip_session_id, reason=reason)
+        self.logger.info(
+            "tip_cancel session_id=%s reason=%s cleanup=%s",
+            self._tip_session_id,
+            reason,
+            result.cleanup_performed,
+        )
+        return result
+
+    async def _activate_tip_fallback(self, *, reason: str) -> bool:
+        if not self._tip_primary_active:
+            return False
+        cleanup_result = await self._cancel_tip_session(reason)
+        cleanup_ready = cleanup_result.success and cleanup_result.cleanup_performed is not False
+        if not cleanup_ready:
+            self.injection_service.handle_focus_changed()
+            self.logger.warning(
+                "fallback_blocked session_id=%s fallback_reason=%s composition_cleanup=%s",
+                self._tip_session_id,
+                reason,
+                cleanup_result.cleanup_performed,
+            )
+            self._tip_primary_active = False
+            self.set_status(f"TIP cleanup 失败，已阻止 fallback 注入: {reason}")
+            return False
+        self.logger.info(
+            "fallback_activated session_id=%s fallback_reason=%s composition_cleanup=%s writer_owner=legacy",
+            self._tip_session_id,
+            reason,
+            cleanup_result.cleanup_performed,
+        )
+        self._tip_primary_active = False
+        if reason == "tip_timeout":
+            self.set_status("TIP 超时，已切换 fallback")
+        else:
+            self.set_status(f"TIP 失败，已切换 fallback: {reason}")
+        return True
 
     def _preview_settings_overlay(self, config: AgentConfig) -> None:
         """在设置页预览浮层样式。"""

@@ -35,6 +35,7 @@ from .injection_manager import TextInjectionManager
 from .overlay_preview import OverlayPreview
 from .overlay_scheduler import OverlayRenderScheduler
 from .text_polisher import TextPolisher
+from .tip_gateway import build_tip_gateway_from_env
 from .win_audio_output import SystemOutputMuteGuard
 from .win_privileges import is_current_process_elevated, restart_as_admin
 from .composition import CompositionSession  # [P1-Fix4] real re-export, not None
@@ -166,6 +167,7 @@ class StableVoiceInputApp:
             enable_tray=enable_tray,
             console=console,
             launch_args=launch_args,
+            tip_gateway=build_tip_gateway_from_env(),
         )
 
         # [P1-Fix1] 用模块级工厂（已被 monkeypatch 替换）重建各 service 实例。

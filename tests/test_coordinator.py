@@ -20,15 +20,47 @@ from doubaoime_asr.agent.events import (
     HotkeyPressEvent,
     HotkeyReleaseEvent,
     AudioLevelEvent,
+    FallbackRequiredEvent,
     InterimResultEvent,
     FinalResultEvent,
     FinishedEvent,
     ErrorEvent,
     ReadyEvent,
     ConfigChangeEvent,
+    ServiceResolvedFinalEvent,
 )
 from doubaoime_asr.agent.session_manager import WorkerSessionState
 from doubaoime_asr.agent.input_injector import FocusTarget
+from doubaoime_asr.agent.service_session_manager import ServiceSessionManager
+
+
+class FakeTipGateway:
+    def __init__(self) -> None:
+        self.available = True
+        self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+        self.begin_result = SimpleNamespace(success=True, reason=None, timeout=False, cleanup_performed=None)
+        self.interim_result = SimpleNamespace(success=True, reason=None, timeout=False, cleanup_performed=None)
+        self.commit_result = SimpleNamespace(success=True, reason=None, timeout=False, cleanup_performed=None)
+        self.cancel_result = SimpleNamespace(success=True, reason=None, timeout=False, cleanup_performed=True)
+
+    def is_available(self) -> bool:
+        return self.available
+
+    async def begin_session(self, *, session_id: str, target: FocusTarget | None):
+        self.calls.append(("begin_session", (), {"session_id": session_id, "target": target}))
+        return self.begin_result
+
+    async def submit_interim(self, *, session_id: str, text: str):
+        self.calls.append(("submit_interim", (), {"session_id": session_id, "text": text}))
+        return self.interim_result
+
+    async def commit_resolved_final(self, *, session_id: str, text: str):
+        self.calls.append(("commit_resolved_final", (), {"session_id": session_id, "text": text}))
+        return self.commit_result
+
+    async def cancel_session(self, *, session_id: str, reason: str):
+        self.calls.append(("cancel_session", (), {"session_id": session_id, "reason": reason}))
+        return self.cancel_result
 
 
 @pytest.fixture
@@ -117,6 +149,16 @@ class TestCoordinatorInit:
 
         assert coord._process_elevated is True
         assert coord.injection_service.target_requires_admin(elevated_target) is False
+
+    def test_init_can_select_service_session_backend_via_env(
+        self,
+        config: AgentConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("DOUBAO_AGENT_SESSION_BACKEND", "service")
+        with patch("doubaoime_asr.agent.coordinator.setup_named_logger"):
+            coord = VoiceInputCoordinator(config, enable_tray=False)
+        assert isinstance(coord.session_manager, ServiceSessionManager)
 
 
 class TestCoordinatorStatus:
@@ -313,6 +355,190 @@ class TestCoordinatorEventHandling:
         coordinator.overlay_service.submit_final.assert_not_awaited()
         assert coordinator.get_status().startswith("最终提交原文:")
 
+    @pytest.mark.asyncio
+    async def test_handle_interim_event_prefers_tip_gateway_when_active(self, config: AgentConfig) -> None:
+        tip_gateway = FakeTipGateway()
+        with patch("doubaoime_asr.agent.coordinator.setup_named_logger") as mock_logger:
+            mock_logger.return_value = logging.getLogger("test-coordinator")
+            coordinator = VoiceInputCoordinator(config, enable_tray=False, console=False, tip_gateway=tip_gateway)
+        coordinator.config.render_debounce_ms = 0
+        coordinator.overlay_service.submit_interim = AsyncMock()
+        coordinator.injection_service.apply_inline_interim = AsyncMock()
+        coordinator._tip_primary_active = True
+        coordinator._tip_session_id = "42"
+        coordinator.session_manager._session = MagicMock(state=WorkerSessionState.STREAMING)
+
+        await coordinator._handle_worker_event(InterimResultEvent(text="你好"))
+
+        coordinator.overlay_service.submit_interim.assert_not_awaited()
+        coordinator.injection_service.apply_inline_interim.assert_not_awaited()
+        assert tip_gateway.calls[-1][0] == "submit_interim"
+
+    @pytest.mark.asyncio
+    async def test_handle_finished_event_uses_tip_commit_when_gateway_succeeds(self, config: AgentConfig) -> None:
+        tip_gateway = FakeTipGateway()
+        with patch("doubaoime_asr.agent.coordinator.setup_named_logger") as mock_logger:
+            mock_logger.return_value = logging.getLogger("test-coordinator")
+            coordinator = VoiceInputCoordinator(config, enable_tray=False, console=False, tip_gateway=tip_gateway)
+        coordinator.overlay_service.submit_final = AsyncMock()
+        coordinator.overlay_service.hide = AsyncMock()
+        coordinator._resolve_final_text = AsyncMock(return_value=SimpleNamespace(text="最终文本", applied_mode="light", fallback_reason=None))
+        coordinator._inject_final = AsyncMock()
+        coordinator._clear_active_session = AsyncMock()
+        coordinator._segment_texts = {0: "原始文本"}
+        coordinator._last_displayed_raw_final_text = "原始文本"
+        coordinator._tip_primary_active = True
+        coordinator._tip_session_id = "7"
+
+        mock_session = MagicMock()
+        mock_session.state = WorkerSessionState.STOPPING
+        mock_session.mode = "inject"
+        mock_session.stop_sent_at = None
+        mock_session.finished_at = None
+        coordinator.session_manager._session = mock_session
+
+        await coordinator._handle_worker_event(FinishedEvent())
+
+        coordinator._inject_final.assert_not_awaited()
+        assert any(call[0] == "commit_resolved_final" for call in tip_gateway.calls)
+
+    @pytest.mark.asyncio
+    async def test_handle_finished_event_falls_back_to_legacy_when_tip_commit_fails(self, config: AgentConfig) -> None:
+        tip_gateway = FakeTipGateway()
+        tip_gateway.commit_result = SimpleNamespace(success=False, reason="tip_failure", timeout=False, cleanup_performed=None)
+        with patch("doubaoime_asr.agent.coordinator.setup_named_logger") as mock_logger:
+            mock_logger.return_value = logging.getLogger("test-coordinator")
+            coordinator = VoiceInputCoordinator(config, enable_tray=False, console=False, tip_gateway=tip_gateway)
+        coordinator.overlay_service.submit_final = AsyncMock()
+        coordinator.overlay_service.hide = AsyncMock()
+        coordinator._resolve_final_text = AsyncMock(return_value=SimpleNamespace(text="最终文本", applied_mode="light", fallback_reason=None))
+        coordinator._inject_final = AsyncMock()
+        coordinator._clear_active_session = AsyncMock()
+        coordinator._segment_texts = {0: "原始文本"}
+        coordinator._last_displayed_raw_final_text = "原始文本"
+        coordinator._tip_primary_active = True
+        coordinator._tip_session_id = "8"
+
+        mock_session = MagicMock()
+        mock_session.state = WorkerSessionState.STOPPING
+        mock_session.mode = "inject"
+        mock_session.stop_sent_at = None
+        mock_session.finished_at = None
+        coordinator.session_manager._session = mock_session
+
+        await coordinator._handle_worker_event(FinishedEvent())
+
+        coordinator._inject_final.assert_awaited_once_with("最终文本")
+        assert any(call[0] == "cancel_session" for call in tip_gateway.calls)
+        assert "已切换 fallback" in coordinator.get_status()
+
+    @pytest.mark.asyncio
+    async def test_handle_finished_event_blocks_legacy_injection_when_tip_cleanup_fails(self, config: AgentConfig) -> None:
+        tip_gateway = FakeTipGateway()
+        tip_gateway.commit_result = SimpleNamespace(success=False, reason="tip_failure", timeout=False, cleanup_performed=None)
+        tip_gateway.cancel_result = SimpleNamespace(success=False, reason="composition_cleanup_failed", timeout=False, cleanup_performed=False)
+        with patch("doubaoime_asr.agent.coordinator.setup_named_logger") as mock_logger:
+            mock_logger.return_value = logging.getLogger("test-coordinator")
+            coordinator = VoiceInputCoordinator(config, enable_tray=False, console=False, tip_gateway=tip_gateway)
+        coordinator.overlay_service.submit_final = AsyncMock()
+        coordinator.overlay_service.hide = AsyncMock()
+        coordinator._resolve_final_text = AsyncMock(return_value=SimpleNamespace(text="�����ı�", applied_mode="light", fallback_reason=None))
+        coordinator._inject_final = AsyncMock()
+        coordinator._clear_active_session = AsyncMock()
+        coordinator._segment_texts = {0: "ԭʼ�ı�"}
+        coordinator._last_displayed_raw_final_text = "ԭʼ�ı�"
+        coordinator._tip_primary_active = True
+        coordinator._tip_session_id = "9"
+
+        mock_session = MagicMock()
+        mock_session.state = WorkerSessionState.STOPPING
+        mock_session.mode = "inject"
+        mock_session.stop_sent_at = None
+        mock_session.finished_at = None
+        coordinator.session_manager._session = mock_session
+
+        await coordinator._handle_worker_event(FinishedEvent())
+
+        coordinator._inject_final.assert_not_awaited()
+        assert coordinator.injection_service.is_injection_blocked() is True
+        assert "cleanup" in coordinator.get_status().lower()
+
+
+    @pytest.mark.asyncio
+    async def test_handle_finished_event_prefers_service_resolved_final(self, coordinator: VoiceInputCoordinator) -> None:
+        coordinator.overlay_service.submit_final = AsyncMock()
+        coordinator.overlay_service.hide = AsyncMock()
+        coordinator._resolve_final_text = AsyncMock()
+        coordinator._inject_final = AsyncMock()
+        coordinator._clear_active_session = AsyncMock()
+        coordinator._segment_texts = {0: "原始文本"}
+        coordinator._last_displayed_raw_final_text = "原始文本"
+        coordinator._pending_service_resolved_final = ServiceResolvedFinalEvent(
+            text="service resolved",
+            raw_text="原始文本",
+            applied_mode="light",
+            fallback_reason=None,
+            committed_source="polished",
+        )
+
+        mock_session = MagicMock()
+        mock_session.state = WorkerSessionState.STOPPING
+        mock_session.mode = "inject"
+        mock_session.stop_sent_at = None
+        mock_session.finished_at = None
+        coordinator.session_manager._session = mock_session
+
+        await coordinator._handle_worker_event(FinishedEvent())
+
+        coordinator._resolve_final_text.assert_not_awaited()
+        coordinator._inject_final.assert_awaited_once_with("service resolved")
+
+    @pytest.mark.asyncio
+    async def test_handle_finished_event_uses_pending_service_fallback_reason(self, coordinator: VoiceInputCoordinator) -> None:
+        coordinator.overlay_service.submit_final = AsyncMock()
+        coordinator.overlay_service.hide = AsyncMock()
+        coordinator._resolve_final_text = AsyncMock()
+        coordinator._inject_final = AsyncMock()
+        coordinator._clear_active_session = AsyncMock()
+        coordinator._segment_texts = {0: "原始文本"}
+        coordinator._last_displayed_raw_final_text = "原始文本"
+        coordinator._pending_service_resolved_final = ServiceResolvedFinalEvent(
+            text="原始文本",
+            raw_text="原始文本",
+            applied_mode="raw_fallback",
+            fallback_reason=None,
+            committed_source="raw",
+        )
+        coordinator._pending_service_fallback_reason = "timeout"
+
+        mock_session = MagicMock()
+        mock_session.state = WorkerSessionState.STOPPING
+        mock_session.mode = "inject"
+        mock_session.stop_sent_at = None
+        mock_session.finished_at = None
+        coordinator.session_manager._session = mock_session
+
+        await coordinator._handle_worker_event(FinishedEvent())
+
+        coordinator._inject_final.assert_awaited_once_with("原始文本")
+        assert "原文" in coordinator.get_status()
+
+    @pytest.mark.asyncio
+    async def test_handle_error_event_cancels_tip_session_when_active(self, config: AgentConfig) -> None:
+        tip_gateway = FakeTipGateway()
+        with patch("doubaoime_asr.agent.coordinator.setup_named_logger") as mock_logger:
+            mock_logger.return_value = logging.getLogger("test-coordinator")
+            coordinator = VoiceInputCoordinator(config, enable_tray=False, console=False, tip_gateway=tip_gateway)
+        coordinator.overlay_service.hide = AsyncMock()
+        coordinator._clear_active_session = AsyncMock()
+        coordinator._asr_preflight.invalidate = MagicMock()
+        coordinator._tip_primary_active = True
+        coordinator._tip_session_id = "19"
+        coordinator.session_manager._session = MagicMock(state=WorkerSessionState.STREAMING)
+
+        await coordinator._handle_worker_event(ErrorEvent(message="识别失败"))
+
+        assert any(call[0] == "cancel_session" for call in tip_gateway.calls)
 
 class TestCoordinatorTextAggregation:
     """测试文本聚合。"""
@@ -529,10 +755,34 @@ class TestCoordinatorPreflight:
         await coordinator._handle_press()
 
         coordinator._asr_preflight.ensure_available.assert_awaited_once_with(
-            coordinator.config.credential_path
+            coordinator.config.credential_path,
+            auto_rotate_device=coordinator.config.auto_rotate_device,
         )
         coordinator.session_manager.ensure_worker.assert_awaited_once()
         coordinator.session_manager.send_command.assert_awaited_once_with("START")
+
+    @pytest.mark.asyncio
+    async def test_handle_press_cancels_tip_session_if_worker_start_fails(self, config: AgentConfig) -> None:
+        tip_gateway = FakeTipGateway()
+        with patch("doubaoime_asr.agent.coordinator.setup_named_logger") as mock_logger:
+            mock_logger.return_value = logging.getLogger("test-coordinator")
+            coordinator = VoiceInputCoordinator(config, enable_tray=False, console=False, tip_gateway=tip_gateway)
+        coordinator._asr_preflight.ensure_available = AsyncMock(
+            return_value=SimpleNamespace(ok=True, stage="ok", message="", latency_ms=8)
+        )
+        coordinator.session_manager.ensure_worker = AsyncMock(
+            return_value=SimpleNamespace(session_id=5, state=WorkerSessionState.READY)
+        )
+        coordinator.session_manager.begin_session = MagicMock()
+        coordinator.session_manager.send_command = AsyncMock(side_effect=RuntimeError("boom"))
+        coordinator.session_manager.restart_worker = AsyncMock()
+        coordinator.injection_service.capture_target = MagicMock(return_value=FocusTarget(hwnd=1, text_input_profile="plain_editor"))
+        coordinator.injection_service.begin_session = MagicMock(return_value=None)
+        coordinator.overlay_service.show_microphone = AsyncMock()
+
+        await coordinator._handle_press()
+
+        assert any(call[0] == "cancel_session" for call in tip_gateway.calls)
 
 
 class TestCoordinatorStop:
