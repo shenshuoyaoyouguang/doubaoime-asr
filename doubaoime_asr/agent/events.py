@@ -228,6 +228,45 @@ class FinishedEvent(VoiceInputEvent):
 
 
 @dataclass(slots=True)
+class ServiceResolvedFinalEvent(VoiceInputEvent):
+    """Service 解析出的最终提交文本。"""
+
+    text: str = ""
+    raw_text: str = ""
+    applied_mode: str = ""
+    fallback_reason: str | None = None
+    committed_source: str = ""
+    event_type: str = field(default="final_resolved", init=False)
+
+    @classmethod
+    def _from_dict_impl(cls, data: dict[str, Any]) -> ServiceResolvedFinalEvent:
+        fallback_reason = data.get("fallback_reason")
+        return ServiceResolvedFinalEvent(
+            text=str(data.get("text", "")),
+            raw_text=str(data.get("raw_text", "")),
+            applied_mode=str(data.get("applied_mode", "")),
+            fallback_reason=str(fallback_reason) if fallback_reason is not None else None,
+            committed_source=str(data.get("committed_source", "")),
+        )
+
+
+@dataclass(slots=True)
+class FallbackRequiredEvent(VoiceInputEvent):
+    """Service/TIP 要求切换 fallback。"""
+
+    reason: str = ""
+    source: str = ""
+    event_type: str = field(default="fallback_required", init=False)
+
+    @classmethod
+    def _from_dict_impl(cls, data: dict[str, Any]) -> FallbackRequiredEvent:
+        return FallbackRequiredEvent(
+            reason=str(data.get("reason", "")),
+            source=str(data.get("source", "")),
+        )
+
+
+@dataclass(slots=True)
 class WorkerExitEvent(VoiceInputEvent):
     """Worker 进程退出事件（Controller 内部使用）。"""
 
@@ -324,6 +363,8 @@ _EVENT_FACTORY: dict[str, type[VoiceInputEvent]] = {
     "final": FinalResultEvent,
     "error": ErrorEvent,
     "finished": FinishedEvent,
+    "final_resolved": ServiceResolvedFinalEvent,
+    "fallback_required": FallbackRequiredEvent,
     "worker_exit": WorkerExitEvent,
     "worker_event": WorkerEventWrapper,
 }
@@ -349,6 +390,8 @@ __all__ = [
     "FinalResultEvent",
     "ErrorEvent",
     "FinishedEvent",
+    "ServiceResolvedFinalEvent",
+    "FallbackRequiredEvent",
     "WorkerExitEvent",
     "WorkerEventWrapper",
     "ReadyEvent",
