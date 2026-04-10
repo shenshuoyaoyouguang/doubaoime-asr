@@ -370,7 +370,7 @@ async def run_worker(args: argparse.Namespace) -> int:
 
     config = ASRConfig(
         credential_path=args.credential_path or AgentConfig.default().credential_path,
-        auto_rotate_device=args.auto_rotate_device
+        auto_rotate_device=getattr(args, "auto_rotate_device", False),
     )
     device = None
     if getattr(args, "mic_device", None):

@@ -24,7 +24,7 @@ from .events import (
     parse_worker_event,
 )
 from .input_injector import FocusTarget
-from .protocol import decode_event
+from .protocol import ProtocolDecodeError, decode_event
 
 
 # 类型别名
@@ -377,7 +377,7 @@ class SessionManager:
                 continue
             try:
                 event_data = decode_event(raw)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, ProtocolDecodeError):
                 self.logger.error("worker_stdout_invalid=%s", raw)
                 continue
             # 处理事件

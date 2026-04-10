@@ -39,3 +39,5 @@ hook_*.js
 
 # Old version directory
 doubaoime_v1.1.2_100102018_official
+
+native_tip/build/
