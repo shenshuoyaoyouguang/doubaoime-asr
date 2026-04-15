@@ -12,6 +12,7 @@ import uuid
 from pydantic import BaseModel, Field
 import websockets
 from websockets import ClientConnection
+from websockets.protocol import State
 
 from .config import ASRConfig, SessionConfig
 from .audio import AudioEncoder
@@ -123,6 +124,27 @@ class _SessionState(BaseModel):
     final_text: str = ""
     is_finished: bool = False
     error: Optional[ASRResponse] = None
+    transport_closed_unexpectedly: bool = False
+    received_final: bool = False
+    received_session_finished: bool = False
+
+
+def _connection_is_open(ws: ClientConnection) -> bool:
+    closed = getattr(ws, "closed", None)
+    if isinstance(closed, bool):
+        return not closed
+
+    state = getattr(ws, "state", None)
+    if state is None:
+        return True
+    try:
+        return state == State.OPEN
+    except Exception:
+        return True
+
+
+def _latency_ms(started_at: float) -> int:
+    return int((time.perf_counter() - started_at) * 1000)
 
 
 class DoubaoASR:
@@ -267,9 +289,17 @@ class DoubaoASR:
                 )
 
                 try:
-                    # 实时模式不使用超时，依靠 WebSocket 层检测断开
                     while True:
-                        resp = await response_queue.get()
+                        if send_task.done():
+                            send_exc = send_task.exception()
+                            if send_exc is not None:
+                                raise send_exc
+                            resp = await asyncio.wait_for(
+                                response_queue.get(),
+                                timeout=self.config.recv_timeout,
+                            )
+                        else:
+                            resp = await response_queue.get()
                         if resp is None:
                             break
 
@@ -281,6 +311,10 @@ class DoubaoASR:
                             break
 
                     await send_task
+                except asyncio.TimeoutError as exc:
+                    raise ASRTransportError(
+                        f"等待最终结果超时({self.config.recv_timeout:.1f}s)"
+                    ) from exc
                 finally:
                     send_task.cancel()
                     recv_task.cancel()
@@ -339,39 +373,40 @@ class DoubaoASR:
                 await ws.send(msg)
                 frame_index += 1
 
-        # 迭代器结束，处理剩余数据
-        if pcm_buffer and not state.is_finished:
-            # 补零到完整帧
-            if len(pcm_buffer) < bytes_per_frame:
-                pcm_buffer += b"\x00" * (bytes_per_frame - len(pcm_buffer))
+finally:
+            # 【关键修复】无论正常结束还是异常中断，都必须发送结束帧和FinishSession
+            # 否则服务器端会话会泄漏，导致 ExceededConcurrentQuota 错误
+            if not state.is_finished and _connection_is_open(ws):
+                try:
+                    if pcm_buffer:
+                        # 处理剩余数据
+                        if len(pcm_buffer) < bytes_per_frame:
+                            pcm_buffer += b"\x00" * (bytes_per_frame - len(pcm_buffer))
+                        opus_frame = self._encoder.encoder.encode(pcm_buffer, samples_per_frame)
+                        msg = _build_asr_request(
+                            opus_frame,
+                            state.request_id,
+                            FrameState.FRAME_STATE_LAST,
+                            timestamp_ms + frame_index * self.config.frame_duration_ms,
+                        )
+                        await ws.send(msg)
+                    elif frame_index > 0:
+                        # 发送空的LAST帧
+                        silent_frame = b"\x00" * bytes_per_frame
+                        opus_frame = self._encoder.encoder.encode(silent_frame, samples_per_frame)
+                        msg = _build_asr_request(
+                            opus_frame,
+                            state.request_id,
+                            FrameState.FRAME_STATE_LAST,
+                            timestamp_ms + frame_index * self.config.frame_duration_ms,
+                        )
+                        await ws.send(msg)
 
-            opus_frame = self._encoder.encoder.encode(pcm_buffer, samples_per_frame)
+                    # 发送FinishSession，这是最重要的！
+                    await ws.send(_build_finish_session(state.request_id, self.config.get_token()))
+                except (websockets.exceptions.WebSocketException, OSError, RuntimeError):
+                    pass
 
-            msg = _build_asr_request(
-                opus_frame,
-                state.request_id,
-                FrameState.FRAME_STATE_LAST,
-                timestamp_ms + frame_index * self.config.frame_duration_ms,
-            )
-            await ws.send(msg)
-        elif frame_index > 0 and not state.is_finished:
-            # 没有剩余数据，但需要发送一个 LAST 帧标记
-            # 发送一个空的 LAST 帧（静音）
-            silent_frame = b"\x00" * bytes_per_frame
-            opus_frame = self._encoder.encoder.encode(silent_frame, samples_per_frame)
-
-            msg = _build_asr_request(
-                opus_frame,
-                state.request_id,
-                FrameState.FRAME_STATE_LAST,
-                timestamp_ms + frame_index * self.config.frame_duration_ms,
-            )
-            await ws.send(msg)
-
-        # FinishSession
-        if not state.is_finished:
-            await ws.send(_build_finish_session(state.request_id, self.config.get_token()))
-    
     async def _initialize_session(self, ws: ClientConnection, state: _SessionState) -> AsyncIterator[ASRResponse]:
         """
         初始化 ASR 会话
