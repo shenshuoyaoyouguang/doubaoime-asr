@@ -306,16 +306,26 @@ class DoubaoASR:
 
                 try:
                     while True:
-                        if send_task.done():
+                        # 使用 asyncio.wait 同时等待发送任务完成或收到响应
+                        # 这样可以确保在发送完成后应用 recv_timeout 超时
+                        done, _ = await asyncio.wait(
+                            [asyncio.create_task(response_queue.get()), send_task],
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+
+                        if send_task in done:
+                            # 检查发送任务是否异常
                             send_exc = send_task.exception()
                             if send_exc is not None:
                                 raise send_exc
-                            resp = await asyncio.wait_for(
-                                response_queue.get(),
-                                timeout=self.config.recv_timeout,
-                            )
+
+                        # 检查是否有响应
+                        if not response_queue.empty():
+                            resp = response_queue.get_nowait()
                         else:
-                            resp = await response_queue.get()
+                            # 队列为空但 send_task 未完成,可能是超时
+                            continue
+
                         if resp is None:
                             break
 
@@ -328,6 +338,11 @@ class DoubaoASR:
 
                     await send_task
                 except asyncio.TimeoutError as exc:
+                    # 检查是否是因为传输意外关闭
+                    if state.transport_closed_unexpectedly and not state.received_final:
+                        raise ASRTransportError(
+                            f"传输意外关闭,未收到最终结果({self.config.recv_timeout:.1f}s)"
+                        ) from exc
                     raise ASRTransportError(
                         f"等待最终结果超时({self.config.recv_timeout:.1f}s)"
                     ) from exc
@@ -510,19 +525,22 @@ class DoubaoASR:
                     await queue.put(resp)
                     break
                 elif resp.type == ResponseType.HEARTBEAT:
-                    # 心跳包也放入队列，用于重置超时计时器
+                    # 心跳包也放入队列,用于重置超时计时器
                     await queue.put(resp)
                 elif resp.type == ResponseType.SESSION_FINISHED:
+                    state.received_session_finished = True
                     state.is_finished = True
                     await queue.put(resp)
                     break
                 elif resp.type == ResponseType.FINAL_RESULT:
+                    state.received_final = True
                     state.final_text = resp.text
                     await queue.put(resp)
                 else:
                     await queue.put(resp)
 
         except websockets.exceptions.ConnectionClosed:
+            state.transport_closed_unexpectedly = True
             state.is_finished = True
         finally:
             # 结束信号

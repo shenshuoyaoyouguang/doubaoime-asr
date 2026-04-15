@@ -124,7 +124,10 @@ async def _handle_interim_result_event(coordinator: "VoiceInputCoordinator", ses
             coordinator.logger.info("tip_interim_applied session_id=%s", coordinator._tip_session_id)
             coordinator.set_status(f"识别中: {text[-24:]}")
             return
-        await coordinator._activate_tip_fallback(reason=tip_result.reason or "tip_interim_failed")
+        fallback_ready = await coordinator._activate_tip_fallback(reason=tip_result.reason or "tip_interim_failed")
+        if not fallback_ready:
+            # 回退失败,阻止本地注入
+            return
 
     # 提交临时结果快照
     seq = await coordinator._submit_interim_snapshot(text)

@@ -658,6 +658,9 @@ class VoiceInputCoordinator:
 
         await self._close_interim_dispatcher()
         await self.session_manager.terminate_worker()
+        # 本地会话清理
+        self.injection_service.end_session()
+        self._reset_session_state()
 
         if not self._stopping:
             self._apply_pending_listener_rebind("listener_rebind_failed_after_worker_exit")
