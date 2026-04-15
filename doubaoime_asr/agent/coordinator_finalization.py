@@ -62,10 +62,10 @@ async def _inject_final(coordinator: VoiceInputCoordinator, text: str) -> None:
     except FocusChangedError:
         coordinator.injection_service.handle_focus_changed()
         coordinator.logger.warning("inject_focus_changed")
-        coordinator.set_status("焦点已变化，仅保留识别")
+        coordinator.set_status("焦点已变化,仅保留识别")
     except Exception:
         coordinator.logger.exception("inject_final_failed")
-        coordinator.set_status("注入失败，仅保留识别")
+        coordinator.set_status("注入失败,仅保留识别")
 
 
 async def _resolve_final_text(coordinator: VoiceInputCoordinator, raw_text: str) -> PolishResult:
@@ -123,18 +123,18 @@ def _status_for_final_result(
         return f"最终结果: {resolved_committed_text[-24:]}"
     excerpt = raw_text[-18:]
     fallback_messages = {
-        "timeout": f"润色超时，已使用原文: {excerpt}",
-        "unavailable": f"润色不可用，已使用原文: {excerpt}",
-        "no_model": f"未配置润色模型，已使用原文: {excerpt}",
-        "invalid_response": f"润色结果无效，已使用原文: {excerpt}",
-        "bad_prompt": f"润色提示词无效，已使用原文: {excerpt}",
+        "timeout": f"润色超时,已使用原文: {excerpt}",
+        "unavailable": f"润色不可用,已使用原文: {excerpt}",
+        "no_model": f"未配置润色模型,已使用原文: {excerpt}",
+        "invalid_response": f"润色结果无效,已使用原文: {excerpt}",
+        "bad_prompt": f"润色提示词无效,已使用原文: {excerpt}",
     }
     return fallback_messages.get(result.fallback_reason or "", f"最终结果: {result.text[-24:]}")
 
 
 def _status_for_error(coordinator: VoiceInputCoordinator, message: str) -> str:
     """生成错误状态。"""
-    LOW_INPUT_STATUS = "未检测到有效麦克风输入，请检查麦克风静音/增益，或在设置中切换麦克风"
+    LOW_INPUT_STATUS = "未检测到有效麦克风输入,请检查麦克风静音/增益,或在设置中切换麦克风"
     if coordinator._should_warn_low_input():
         return LOW_INPUT_STATUS
     return f"识别失败: {message}"

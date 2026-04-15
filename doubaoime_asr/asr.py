@@ -21,6 +21,15 @@ from .asr_pb2 import AsrRequest, AsrResponse as AsrResponsePb, FrameState
 # PCM 音频数据的类型别名
 AudioChunk = bytes
 
+__all__ = [
+    "ASRConfig",
+    "ASRError",
+    "ASRTransportError",
+    "ASRResponse",
+    "ASRResult",
+    "ResponseType",
+]
+
 
 class ResponseType(Enum):
     """

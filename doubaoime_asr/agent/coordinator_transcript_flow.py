@@ -140,12 +140,12 @@ def current_target_profile(coordinator) -> str:
 
 
 def text_digest(text: str) -> str:
-    """计算文本摘要（SHA1 前10位）。"""
+    """计算文本摘要(SHA1 前10位)。"""
     if not text:
         return "empty"
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:10]
 
 
 def concat_transcript_text_module(current: str, incoming: str) -> str:
-    """拼接文本，处理重叠。"""
+    """拼接文本,处理重叠。"""
     return concat_transcript_text(current, incoming)

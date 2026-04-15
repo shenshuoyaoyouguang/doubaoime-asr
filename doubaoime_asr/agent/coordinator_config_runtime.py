@@ -32,7 +32,7 @@ def preview_settings_overlay(coordinator: "VoiceInputCoordinator", config: Agent
     if coordinator._loop is None:
         return
     if coordinator.session_manager.is_streaming():
-        coordinator.set_status("录音中，暂不预览浮层")
+        coordinator.set_status("录音中,暂不预览浮层")
         return
     with coordinator._preview_lock:
         coordinator._preview_counter += 1
@@ -45,13 +45,13 @@ def preview_settings_overlay(coordinator: "VoiceInputCoordinator", config: Agent
 
 async def run_preview_overlay(coordinator: "VoiceInputCoordinator", config: AgentConfig, *, preview_id: int) -> None:
     """应用临时配置并显示短暂预览。"""
-    # 如果正在录音，提前返回，避免与会话启动竞争
+    # 如果正在录音,提前返回,避免与会话启动竞争
     if coordinator.session_manager.is_streaming():
         return
 
     coordinator.overlay_service.configure(config)
     try:
-        await coordinator.overlay_service.show_microphone("浮层预览：请确认字号、宽度与透明度")
+        await coordinator.overlay_service.show_microphone("浮层预览:请确认字号、宽度与透明度")
         await asyncio.sleep(1.2)
     finally:
         with coordinator._preview_lock:
@@ -132,7 +132,7 @@ async def apply_config(coordinator: "VoiceInputCoordinator", new_config: AgentCo
             await coordinator.session_manager.restart_worker()
         with contextlib.suppress(Exception):
             coordinator.config.save()
-        coordinator.set_status("设置保存失败，已恢复旧配置")
+        coordinator.set_status("设置保存失败,已恢复旧配置")
         return
 
     if coordinator._tray_icon is not None:

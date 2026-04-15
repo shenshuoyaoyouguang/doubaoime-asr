@@ -1,7 +1,7 @@
 """
 Coordinator Worker Events 模块。
 
-提供 Worker 事件处理功能，由 coordinator.py 委托处理各类 Worker 事件。
+提供 Worker 事件处理功能,由 coordinator.py 委托处理各类 Worker 事件。
 """
 from __future__ import annotations
 
@@ -29,8 +29,8 @@ from .text_polisher import PolishResult
 # ===== 主入口函数 =====
 
 
-async def _handle_worker_event(coordinator, event: VoiceInputEvent) -> None:
-    """处理 Worker 发送的事件（主入口）。"""
+async def _handle_worker_event(coordinator: "VoiceInputCoordinator", event: VoiceInputEvent) -> None:
+    """处理 Worker 发送的事件(主入口)。"""
     session = coordinator.session_manager.get_session()
     if session is None:
         return
@@ -66,20 +66,20 @@ async def _handle_worker_event(coordinator, event: VoiceInputEvent) -> None:
 # ===== 各事件类型处理函数 =====
 
 
-async def _handle_worker_ready_event(coordinator, session, event: WorkerReadyEvent) -> None:
+async def _handle_worker_ready_event(coordinator: "VoiceInputCoordinator", session, event: WorkerReadyEvent) -> None:
     """处理 WorkerReadyEvent。"""
     session.process_ready = True
 
 
-async def _handle_ready_event(coordinator, session, event: ReadyEvent) -> None:
+async def _handle_ready_event(coordinator: "VoiceInputCoordinator", session, event: ReadyEvent) -> None:
     """处理 ReadyEvent。"""
     if session.state == WorkerSessionState.STREAMING:
         session.ready = True
-        coordinator.set_status("录音中，等待说话")
+        coordinator.set_status("录音中,等待说话")
         await coordinator._send_stop_if_needed()
 
 
-async def _handle_streaming_started_event(coordinator, session, event: StreamingStartedEvent) -> None:
+async def _handle_streaming_started_event(coordinator: "VoiceInputCoordinator", session, event: StreamingStartedEvent) -> None:
     """处理 StreamingStartedEvent。"""
     if session.state == WorkerSessionState.STREAMING:
         session.streaming_started = True
@@ -91,20 +91,20 @@ async def _handle_streaming_started_event(coordinator, session, event: Streaming
     await coordinator._send_stop_if_needed()
 
 
-async def _handle_worker_status_event(coordinator, session, event: WorkerStatusEvent) -> None:
+async def _handle_worker_status_event(coordinator: "VoiceInputCoordinator", session, event: WorkerStatusEvent) -> None:
     """处理 WorkerStatusEvent。"""
     if event.message:
         coordinator.set_status(event.message)
 
 
-async def _handle_audio_level_event(coordinator, session, event: AudioLevelEvent) -> None:
+async def _handle_audio_level_event(coordinator: "VoiceInputCoordinator", session, event: AudioLevelEvent) -> None:
     """处理 AudioLevelEvent。"""
     if session.state == WorkerSessionState.STREAMING:
         coordinator._record_audio_level(event.level)
         await coordinator.overlay_service.update_microphone_level(event.level)
 
 
-async def _handle_interim_result_event(coordinator, session, event: InterimResultEvent) -> None:
+async def _handle_interim_result_event(coordinator: "VoiceInputCoordinator", session, event: InterimResultEvent) -> None:
     """处理 InterimResultEvent。"""
     if session.state != WorkerSessionState.STREAMING:
         return
@@ -140,7 +140,7 @@ async def _handle_interim_result_event(coordinator, session, event: InterimResul
     coordinator.set_status(f"识别中: {text[-24:]}")
 
 
-async def _handle_final_result_event(coordinator, session, event: FinalResultEvent) -> None:
+async def _handle_final_result_event(coordinator: "VoiceInputCoordinator", session, event: FinalResultEvent) -> None:
     """处理 FinalResultEvent。"""
     if session.state != WorkerSessionState.STREAMING:
         return
@@ -164,7 +164,7 @@ async def _handle_final_result_event(coordinator, session, event: FinalResultEve
         coordinator.set_status(f"识别中: {raw_text[-24:]}")
 
 
-async def _handle_error_event(coordinator, session, event: ErrorEvent) -> None:
+async def _handle_error_event(coordinator: "VoiceInputCoordinator", session, event: ErrorEvent) -> None:
     """处理 ErrorEvent。"""
     coordinator._asr_preflight.invalidate()
     if coordinator._tip_primary_active:
@@ -175,18 +175,18 @@ async def _handle_error_event(coordinator, session, event: ErrorEvent) -> None:
 
 
 async def _handle_service_resolved_final_event(
-    coordinator, session, event: ServiceResolvedFinalEvent
+    coordinator: "VoiceInputCoordinator", session, event: ServiceResolvedFinalEvent
 ) -> None:
     """处理 ServiceResolvedFinalEvent。"""
     coordinator._pending_service_resolved_final = event
 
 
-async def _handle_fallback_required_event(coordinator, session, event: FallbackRequiredEvent) -> None:
+async def _handle_fallback_required_event(coordinator: "VoiceInputCoordinator", session, event: FallbackRequiredEvent) -> None:
     """处理 FallbackRequiredEvent。"""
     coordinator._pending_service_fallback_reason = event.reason or None
 
 
-async def _handle_finished_event(coordinator, session, event: FinishedEvent) -> None:
+async def _handle_finished_event(coordinator: "VoiceInputCoordinator", session, event: FinishedEvent) -> None:
     """处理 FinishedEvent - 最复杂的处理逻辑。"""
     coordinator._finished_event_started_at = time.perf_counter()
     await coordinator._flush_interim_dispatcher(reason="finished")
@@ -201,7 +201,7 @@ async def _handle_finished_event(coordinator, session, event: FinishedEvent) -> 
         if session.mode == "inject":
             coordinator.set_status("正在准备上屏…")
 
-        # 解析最终文本（使用 Service、Polisher 或原始文本）
+        # 解析最终文本(使用 Service、Polisher 或原始文本)
         if coordinator._pending_service_resolved_final is not None:
             service_final = coordinator._pending_service_resolved_final
             fallback_reason = service_final.fallback_reason or coordinator._pending_service_fallback_reason
@@ -293,7 +293,7 @@ async def _handle_finished_event(coordinator, session, event: FinishedEvent) -> 
     # 空文本处理
     if not raw_text:
         if coordinator._should_warn_low_input():
-            coordinator.set_status("未检测到有效麦克风输入，请检查麦克风静音/增益，或在设置中切换麦克风")
+            coordinator.set_status("未检测到有效麦克风输入,请检查麦克风静音/增益,或在设置中切换麦克风")
         elif not coordinator._status.startswith("识别失败"):
             coordinator.set_status("空闲")
 

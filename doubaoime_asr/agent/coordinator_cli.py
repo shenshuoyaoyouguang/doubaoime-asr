@@ -32,53 +32,53 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--mode",
         choices=("recognize", "inject"),
         default=argparse.SUPPRESS,
-        help="recognize 仅识别；inject 识别后尝试写入当前焦点输入框",
+        help="recognize 仅识别;inject 识别后尝试写入当前焦点输入框",
     )
-    parser.add_argument("--hotkey", help="覆盖默认热键，例如 right_ctrl / f9 / space")
+    parser.add_argument("--hotkey", help="覆盖默认热键,例如 right_ctrl / f9 / space")
     parser.add_argument("--mic-device", help="覆盖麦克风设备名称或索引")
     parser.add_argument("--credential-path", help="覆盖凭据文件路径")
     parser.add_argument(
         "--injection-policy",
         choices=SUPPORTED_INJECTION_POLICIES,
         default=argparse.SUPPRESS,
-        help="direct_only 仅直接输入；direct_then_clipboard 失败时允许剪贴板回退",
+        help="direct_only 仅直接输入;direct_then_clipboard 失败时允许剪贴板回退",
     )
     parser.add_argument(
         "--streaming-text-mode",
         choices=SUPPORTED_STREAMING_TEXT_MODES,
         default=argparse.SUPPRESS,
-        help="safe_inline 安全编辑框实时上屏；overlay_only 仅显示浮层",
+        help="safe_inline 安全编辑框实时上屏;overlay_only 仅显示浮层",
     )
     parser.add_argument(
         "--final-commit-source",
         choices=SUPPORTED_FINAL_COMMIT_SOURCES,
         default=argparse.SUPPRESS,
-        help="polished 提交润色结果（兼容当前行为）；raw 提交原始识别结果",
+        help="polished 提交润色结果(兼容当前行为);raw 提交原始识别结果",
     )
     parser.add_argument(
         "--capture-output-policy",
         choices=SUPPORTED_CAPTURE_OUTPUT_POLICIES,
         default=argparse.SUPPRESS,
-        help="off 保持现状；mute_system_output 在录音期间静音系统输出",
+        help="off 保持现状;mute_system_output 在录音期间静音系统输出",
     )
     parser.add_argument(
         "--polish-mode",
         choices=SUPPORTED_POLISH_MODES,
         default=argparse.SUPPRESS,
-        help="light 轻量整理（推荐）；off 关闭；ollama 使用本地 Ollama 模型润色最终结果（较慢）",
+        help="light 轻量整理(推荐);off 关闭;ollama 使用本地 Ollama 模型润色最终结果(较慢)",
     )
-    parser.add_argument("--ollama-base-url", help="本地 Ollama 服务地址，默认 http://localhost:11434")
-    parser.add_argument("--ollama-model", help="本地 Ollama 模型名，为空时仅在唯一模型场景下自动探测")
+    parser.add_argument("--ollama-base-url", help="本地 Ollama 服务地址,默认 http://localhost:11434")
+    parser.add_argument("--ollama-model", help="本地 Ollama 模型名,为空时仅在唯一模型场景下自动探测")
     parser.add_argument("--polish-timeout-ms", type=int, help="最终结果润色超时毫秒数")
-    parser.add_argument("--ollama-keep-alive", help="Ollama 模型保温时长，例如 15m")
+    parser.add_argument("--ollama-keep-alive", help="Ollama 模型保温时长,例如 15m")
     parser.add_argument("--disable-ollama-warmup", action="store_true", help="关闭程序启动后的 Ollama 模型预热")
     parser.add_argument("--render-debounce-ms", type=int, help="流式渲染防抖毫秒数")
     parser.add_argument("--worker-ready-timeout-ms", type=int, help="Worker 热启动就绪超时毫秒数")
     parser.add_argument("--worker-cold-ready-timeout-ms", type=int, help="Worker 冷启动就绪超时毫秒数")
     parser.add_argument("--worker-exit-grace-timeout-ms", type=int, help="Worker 优雅退出等待毫秒数")
     parser.add_argument("--worker-kill-wait-timeout-ms", type=int, help="Worker 强制终止后等待毫秒数")
-    parser.add_argument("--console", action="store_true", help="显示控制台输出，便于调试")
-    parser.add_argument("--no-tray", action="store_true", help="禁用系统托盘，仅作为前台常驻工具运行")
+    parser.add_argument("--console", action="store_true", help="显示控制台输出,便于调试")
+    parser.add_argument("--no-tray", action="store_true", help="禁用系统托盘,仅作为前台常驻工具运行")
     return parser
 
 

@@ -73,8 +73,8 @@ def _elevation_status_message(  # type: ignore[misc]
     """生成管理员权限状态消息。"""
     subject = "管理员终端" if target.is_terminal else "管理员窗口"
     if coordinator.enable_tray:
-        return f"{subject}需要以管理员身份运行代理；请从托盘选择\"以管理员重启\""
-    return f"{subject}需要以管理员身份运行代理；请重新以管理员身份启动代理"
+        return f"{subject}需要以管理员身份运行代理;请从托盘选择\"以管理员重启\""
+    return f"{subject}需要以管理员身份运行代理;请重新以管理员身份启动代理"
 
 
 async def _handle_restart_as_admin(coordinator) -> None:  # type: ignore[misc]
@@ -90,7 +90,7 @@ async def _handle_restart_as_admin(coordinator) -> None:  # type: ignore[misc]
         )
     except Exception:
         coordinator.logger.exception("restart_as_admin_failed")
-        coordinator.set_status("管理员重启失败，请查看 controller.log")
+        coordinator.set_status("管理员重启失败,请查看 controller.log")
         return
     if not restarted:
         coordinator.logger.warning("restart_as_admin_declined")

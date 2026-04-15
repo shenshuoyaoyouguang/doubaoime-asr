@@ -1,7 +1,7 @@
 """
 VoiceInputCoordinator - 精简协调器。
 
-集成 SessionManager、OverlayService、InjectionService、HotkeyService，
+集成 SessionManager, OverlayService, InjectionService, HotkeyService
 通过委托模式将 Controller 逻辑分散到各 Service。
 """
 from __future__ import annotations
@@ -110,21 +110,21 @@ from .coordinator_worker_events import _handle_worker_event
 
 Mode = Literal["recognize", "inject"]
 FOREGROUND_POLL_INTERVAL_S = 0.5
-RECOGNIZE_ONLY_STATUS = "启动识别中（仅识别，不自动上屏）…"
+RECOGNIZE_ONLY_STATUS = "启动识别中(仅识别, 不自动上屏)..."
 LOW_INPUT_AUDIO_LEVEL_THRESHOLD = 0.01
-LOW_INPUT_STATUS = "未检测到有效麦克风输入，请检查麦克风静音/增益，或在设置中切换麦克风"
+LOW_INPUT_STATUS = "未检测到有效麦克风输入, 请检查麦克风静音/增益, 或在设置中切换麦克风"
 
 
 class VoiceInputCoordinator:
-    """语音输入协调器，集成各 Service 并协调事件处理。
+    """语音输入协调器, 集成各 Service 并协调事件处理。
 
-    Coordinator 负责：
+    Coordinator 负责:
     1. 事件循环调度
     2. Service 间协调
     3. 配置更新广播
     4. 状态管理
 
-    各 Service 负责具体实现：
+    各 Service 负责具体实现:
     - SessionManager: Worker 进程生命周期
     - OverlayService: 浮层显示控制
     - InjectionService: 文本注入逻辑
@@ -207,7 +207,7 @@ class VoiceInputCoordinator:
         self._tray_icon = None
         self._tray_thread: threading.Thread | None = None
 
-        # 会话状态（由 _transcript 持有，兼容属性暴露旧访问路径）
+        # 会话状态(由 _transcript 持有, 兼容属性暴露旧访问路径)
         self._finished_event_started_at: float | None = None
         self._interim_dispatcher: DebouncedInterimDispatcher | None = None
         self._last_interim_flush_seq = 0
@@ -317,7 +317,7 @@ class VoiceInputCoordinator:
         self.hotkey_service.on_release(lambda: self._emit_threadsafe(loop, HotkeyReleaseEvent()))
         self.hotkey_service.start(self.config.effective_hotkey_vk())
 
-        # 前景窗口监控（非管理员时）
+        # 前景窗口监控(非管理员时)
         if not self._process_elevated:
             self._foreground_watch_task = asyncio.create_task(
                 self._watch_foreground_target(),
@@ -353,7 +353,7 @@ class VoiceInputCoordinator:
                     await self._handle_event(event)
                 except Exception:
                     self.logger.exception("coordinator_event_failed event=%s", event.event_type)
-                    self.set_status("协调器异常，请查看 controller.log")
+                    self.set_status("协调器异常, 请查看 controller.log")
                     await self._terminate_worker()
         except KeyboardInterrupt:
             self.stop()
@@ -430,11 +430,7 @@ class VoiceInputCoordinator:
         else:
             self.logger.info("inject_skipped reason=recognize_mode phase=session_start")
 
-        self._tip_session_id = None
-        self._tip_primary_active = False
-        self._pending_service_resolved_final = None
-        self._pending_service_fallback_reason = None
-        self._reset_session_diagnostics()
+        self._reset_session_state()
         if self.mode == "inject" and self._tip_gateway.is_available():
             try:
                 tip_result = await self._tip_gateway.begin_session(session_id=str(session.session_id), target=target)
@@ -450,7 +446,7 @@ class VoiceInputCoordinator:
                     )
             except Exception:
                 self.logger.exception("tip_start_failed")
-                # TIP 启动失败不影响主流程，继续运行
+                # TIP 启动失败不影响主流程, 继续运行
 
         # 开始会话
         self.session_manager.begin_session(target, self.mode)
@@ -480,7 +476,7 @@ class VoiceInputCoordinator:
             self.injection_service.end_session()
             restore_warning = self._release_capture_output()
             self.logger.exception("worker_start_command_failed")
-            self.set_status(restore_warning or "启动识别失败，请查看 controller.log")
+            self.set_status(restore_warning or "启动识别失败, 请查看 controller.log")
             await self.session_manager.restart_worker()
             return
 
@@ -523,7 +519,7 @@ class VoiceInputCoordinator:
         await _handle_worker_event(self, event)
 
     async def _send_stop_if_needed(self) -> None:
-        """延迟发送 STOP（如果需要）。"""
+        """延迟发送 STOP(如果需要)。"""
         session = self.session_manager.get_session()
         if session is None or session.stop_sent or not session.pending_stop:
             return
@@ -597,6 +593,14 @@ class VoiceInputCoordinator:
         self._session_saw_audio_level = False
         self._session_received_transcript = False
 
+    def _reset_session_state(self) -> None:
+        """重置会话状态(清除 TIP 和待处理事件)。"""
+        self._tip_session_id = None
+        self._tip_primary_active = False
+        self._pending_service_resolved_final = None
+        self._pending_service_fallback_reason = None
+        self._reset_session_diagnostics()
+
     def _record_audio_level(self, level: float) -> None:
         """记录音频级别。"""
         self._session_saw_audio_level = True
@@ -618,7 +622,7 @@ class VoiceInputCoordinator:
         return _resolve_committed_text(self, raw_text, result)
 
     def _concat_transcript_text(self, current: str, incoming: str) -> str:
-        """拼接文本，处理重叠。"""
+        """拼接文本,处理重叠。"""
         return concat_transcript_text_module(current, incoming)
 
     # ===== Worker 退出处理 =====
@@ -661,11 +665,7 @@ class VoiceInputCoordinator:
         await self._close_interim_dispatcher()
         self.session_manager.clear_session()
         self.injection_service.end_session()
-        self._tip_session_id = None
-        self._tip_primary_active = False
-        self._pending_service_resolved_final = None
-        self._pending_service_fallback_reason = None
-        self._reset_session_diagnostics()
+        self._reset_session_state()
         restore_warning = self._release_capture_output()
         if restore_warning is not None:
             self.set_status(restore_warning)
@@ -705,7 +705,7 @@ class VoiceInputCoordinator:
                 cleanup_result.cleanup_performed,
             )
             self._tip_primary_active = False
-            self.set_status(f"TIP cleanup 失败，已阻止 fallback 注入: {reason}")
+            self.set_status(f"TIP cleanup 失败,已阻止 fallback 注入: {reason}")
             return False
         self.logger.info(
             "fallback_activated session_id=%s fallback_reason=%s composition_cleanup=%s writer_owner=legacy",
@@ -715,9 +715,9 @@ class VoiceInputCoordinator:
         )
         self._tip_primary_active = False
         if reason == "tip_timeout":
-            self.set_status("TIP 超时，已切换 fallback")
+            self.set_status("TIP 超时,已切换 fallback")
         else:
-            self.set_status(f"TIP 失败，已切换 fallback: {reason}")
+            self.set_status(f"TIP 失败,已切换 fallback: {reason}")
         return True
 
     def _preview_settings_overlay(self, config: AgentConfig) -> None:
@@ -782,7 +782,7 @@ class VoiceInputCoordinator:
             self.capture_output_guard.activate()
         except AudioOutputMuteError:
             self.logger.exception("capture_output_activate_failed")
-            return "启动识别中…（自动静音失败，请查看 controller.log）"
+            return "启动识别中...(自动静音失败,请查看 controller.log)"
         return None
 
     def _release_capture_output(self) -> str | None:
@@ -791,7 +791,7 @@ class VoiceInputCoordinator:
             self.capture_output_guard.release()
         except AudioOutputMuteError:
             self.logger.exception("capture_output_release_failed")
-            return "恢复系统输出失败，请查看 controller.log"
+            return "恢复系统输出失败,请查看 controller.log"
         return None
 
     def _session_start_status(self, capture_output_warning: str | None) -> str:
@@ -828,7 +828,7 @@ class VoiceInputCoordinator:
         resolved = mode or self.mode
         if resolved == "inject":
             return "自动上屏"
-        return "仅识别（不自动上屏）"
+        return "仅识别(不自动上屏)"
 
     def _print_startup_info(self) -> None:
         """打印启动信息。"""
@@ -837,7 +837,7 @@ class VoiceInputCoordinator:
         print("=" * 50)
         print(f"模式: {self._mode_display_label()}")
         print(f"热键: {self.config.effective_hotkey_display()}")
-        print("使用方式：按住热键说话，松开结束。")
+        print("使用方式:按住热键说话,松开结束。")
         print("按 Ctrl+C 退出。")
         print()
 
@@ -923,6 +923,8 @@ class VoiceInputCoordinator:
         self.session_manager.stop()
         with contextlib.suppress(Exception):
             self._event_queue.put_nowait(StopEvent())
+        # 释放录音静音,防止退出后系统音频仍被静音
+        self._release_capture_output()
 
     # ===== Tray =====
 

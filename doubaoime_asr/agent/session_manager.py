@@ -1,7 +1,7 @@
 """
 SessionManager - Worker 进程状态管理器。
 
-从 Controller 中提取 WorkerSession 状态管理，封装 worker 进程生命周期。
+从 Controller 中提取 WorkerSession 状态管理,封装 worker 进程生命周期。
 """
 from __future__ import annotations
 
@@ -34,10 +34,10 @@ Mode = str  # "recognize" | "inject"
 class WorkerSessionState(Enum):
     """Worker 会话状态机。"""
     IDLE = "idle"          # 无进程或进程已终止
-    STARTING = "starting"  # 进程正在启动，等待就绪
-    READY = "ready"        # 进程就绪，空闲等待
+    STARTING = "starting"  # 进程正在启动,等待就绪
+    READY = "ready"        # 进程就绪,空闲等待
     STREAMING = "streaming"  # 正在录音/识别
-    STOPPING = "stopping"  # 发送了 STOP，等待结束
+    STOPPING = "stopping"  # 发送了 STOP,等待结束
     TERMINATING = "terminating"  # 正在终止进程
 
 
@@ -446,7 +446,7 @@ class SessionManager:
         self._session = None
 
     async def _close_process_streams(self, process: asyncio.subprocess.Process) -> None:
-        """显式关闭 subprocess pipe，避免 transport 在后续 GC 时泄漏 warning。"""
+        """显式关闭 subprocess pipe,避免 transport 在后续 GC 时泄漏 warning。"""
         stdin = getattr(process, "stdin", None)
         if stdin is not None:
             with contextlib.suppress(Exception):
