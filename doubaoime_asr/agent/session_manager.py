@@ -167,33 +167,8 @@ class SessionManager:
         self._loop = asyncio.get_running_loop()
 
         # 等待进程就绪
-        timeout_s = self._select_ready_timeout_seconds()
-        self.logger.info(
-            "worker_wait_ready session_id=%s start_kind=%s timeout_ms=%s",
-            session.session_id,
-            "warm" if self._worker_started_once else "cold",
-            int(timeout_s * 1000),
-        )
-        started_at = self._loop.time()
-        deadline = started_at + timeout_s
-        while self._loop.time() < deadline:
-            if session.process_ready:
-                session.transition_to(WorkerSessionState.READY)
-                self._worker_started_once = True
-                self.logger.info("worker_ready session_id=%s pid=%s", session.session_id, process.pid)
-                return session
-            if session.process.returncode is not None:
-                break
-            await asyncio.sleep(0.02)
-
-        await self._terminate_session_process(session)
-        await self._dispose_worker()
-        self.logger.warning(
-            "worker_wait_ready_timeout session_id=%s waited_ms=%s",
-            session.session_id,
-            int((self._loop.time() - started_at) * 1000),
-        )
-        raise RuntimeError("worker process did not become ready")
+        await self._await_session_ready(session)
+        return session
 
     async def terminate_worker(self) -> None:
         """终止 Worker 进程。"""
@@ -204,11 +179,14 @@ class SessionManager:
         await self._dispose_worker()
 
     async def _wait_for_ready(self) -> None:
-        """等待 Worker 进程就绪。复用现有的等待逻辑。"""
-        session = self._session
-        if session is None:
+        """等待现有 Worker 进程就绪。"""
+        if self._session is None:
             return
-        
+        self._loop = asyncio.get_running_loop()
+        await self._await_session_ready(self._session)
+
+    async def _await_session_ready(self, session: WorkerSession) -> None:
+        """等待会话就绪的通用逻辑。"""
         timeout_s = self._select_ready_timeout_seconds()
         self.logger.info(
             "worker_wait_ready session_id=%s start_kind=%s timeout_ms=%s",
@@ -236,7 +214,6 @@ class SessionManager:
             int((self._loop.time() - started_at) * 1000),
         )
         raise RuntimeError("worker process did not become ready")
-
 
     async def restart_worker(self) -> None:
         """重启 Worker 进程。"""
