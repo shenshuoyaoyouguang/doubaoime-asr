@@ -367,7 +367,7 @@ class DoubaoASR:
 
                 pcm_buffer += chunk
 
-                # 当缓冲区有足够数据时，编码并发送
+                # 当缓冲区有足够数据时,编码并发送
                 while len(pcm_buffer) >= bytes_per_frame:
                     pcm_frame = pcm_buffer[:bytes_per_frame]
                     pcm_buffer = pcm_buffer[bytes_per_frame:]
@@ -375,7 +375,7 @@ class DoubaoASR:
                     # 编码为 Opus
                     opus_frame = self._encoder.encoder.encode(pcm_frame, samples_per_frame)
 
-                    # 确定帧状态（实时模式下不知道最后一帧，使用 FIRST/MIDDLE）
+                    # 确定帧状态(实时模式下不知道最后一帧,使用 FIRST/MIDDLE)
                     if frame_index == 0:
                         frame_state = FrameState.FRAME_STATE_FIRST
                     else:
@@ -389,8 +389,11 @@ class DoubaoASR:
                     )
                     await ws.send(msg)
                     frame_index += 1
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            pass
+            self.logger.exception("audio_send_realtime_failed")
+            raise
         finally:
             # 【关键修复】无论正常结束还是异常中断，都必须发送结束帧和FinishSession
             # 否则服务器端会话会泄漏，导致 ExceededConcurrentQuota 错误

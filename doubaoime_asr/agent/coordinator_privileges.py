@@ -125,6 +125,10 @@ def _check_foreground_elevation(coordinator) -> None:  # type: ignore[misc]
     except Exception:
         coordinator.logger.exception("foreground_target_capture_failed")
         return
+    # 检查 target 是否为 None
+    if target is None:
+        _clear_elevation_warning(coordinator)
+        return
     if coordinator.injection_service.target_requires_admin(target):
         _record_elevation_warning(
             coordinator, target, log_tag="foreground_elevated_target_detected"

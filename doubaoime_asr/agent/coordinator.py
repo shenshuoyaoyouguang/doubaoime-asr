@@ -449,12 +449,19 @@ class VoiceInputCoordinator:
                 # TIP 启动失败不影响主流程, 继续运行
 
         # 开始会话
-        self.session_manager.begin_session(target, self.mode)
-        composition = self.injection_service.begin_session(
-            target,
-            self.mode,
-            inline_streaming_enabled=inline_streaming_enabled,
-        )
+        try:
+            self.session_manager.begin_session(target, self.mode)
+            composition = self.injection_service.begin_session(
+                target,
+                self.mode,
+                inline_streaming_enabled=inline_streaming_enabled,
+            )
+        except Exception:
+            # 会话设置失败,取消 TIP 并清理状态
+            if self._tip_primary_active:
+                await self._cancel_tip_session("session_setup_failed")
+            self._reset_session_state()
+            raise
         await self._close_interim_dispatcher()
         self._interim_dispatcher = DebouncedInterimDispatcher(
             debounce_ms=self.config.render_debounce_ms,
