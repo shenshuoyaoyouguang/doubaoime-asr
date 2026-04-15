@@ -42,12 +42,17 @@ class ServiceSessionManager:
         self._next_session_id = 0
         self._stopping = False
         self._worker_started_once = False
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def ensure_worker(self) -> WorkerSession:
         if self._session is not None and self._session.process.returncode is None:
             if self._session.process_ready:
                 return self._session
-
+            # 进程存活但未就绪，检查是否处于 STARTING 状态（正在等待就绪）
+            if self._session.state == WorkerSessionState.STARTING:
+                # 复用现有的等待逻辑，等待其就绪
+                await self._wait_for_ready()
+                return self._session
         if self._session is not None and self._session.process.returncode is not None:
             await self._dispose_service()
 
@@ -63,11 +68,11 @@ class ServiceSessionManager:
         session.wait_task = asyncio.create_task(self._wait_service(process, session.session_id))
         self._session = session
 
-        loop = asyncio.get_running_loop()
+        self._loop = asyncio.get_running_loop()
         timeout_s = self.config.worker_ready_timeout_seconds(cold_start=not self._worker_started_once)
-        started_at = loop.time()
+        started_at = self._loop.time()
         deadline = started_at + timeout_s
-        while loop.time() < deadline:
+        while self._loop.time() < deadline:
             if session.process_ready:
                 session.transition_to(WorkerSessionState.READY)
                 self._worker_started_once = True
@@ -82,7 +87,42 @@ class ServiceSessionManager:
         self.logger.warning(
             "service_wait_ready_timeout session_id=%s waited_ms=%s",
             session.session_id,
-            int((loop.time() - started_at) * 1000),
+            int((self._loop.time() - started_at) * 1000),
+        )
+        raise RuntimeError("service process did not become ready")
+
+
+    async def _wait_for_ready(self) -> None:
+        """等待 Service 进程就绪。复用现有的等待逻辑。"""
+        session = self._session
+        if session is None:
+            return
+
+        timeout_s = self.config.worker_ready_timeout_seconds(cold_start=not self._worker_started_once)
+        self.logger.info(
+            "service_wait_ready session_id=%s start_kind=%s timeout_ms=%s",
+            session.session_id,
+            "warm" if self._worker_started_once else "cold",
+            int(timeout_s * 1000),
+        )
+        started_at = self._loop.time()
+        deadline = started_at + timeout_s
+        while self._loop.time() < deadline:
+            if session.process_ready:
+                session.transition_to(WorkerSessionState.READY)
+                self._worker_started_once = True
+                self.logger.info("service_ready session_id=%s pid=%s", session.session_id, session.process.pid)
+                return
+            if session.process.returncode is not None:
+                break
+            await asyncio.sleep(0.02)
+
+        await self._terminate_session_process(session)
+        await self._dispose_service()
+        self.logger.warning(
+            "service_wait_ready_timeout session_id=%s waited_ms=%s",
+            session.session_id,
+            int((self._loop.time() - started_at) * 1000),
         )
         raise RuntimeError("service process did not become ready")
 
