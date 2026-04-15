@@ -11,11 +11,12 @@ import sys
 from typing import TYPE_CHECKING
 
 from .win_privileges import restart_as_admin
+from .session_manager import WorkerSessionState
 
 if TYPE_CHECKING:
     from .injection_service import InjectionService
     from .input_injector import FocusTarget
-    from .session_manager import SessionManager, WorkerSessionState
+    from .session_manager import SessionManager
 
 FOREGROUND_POLL_INTERVAL_S = 0.5
 
@@ -60,7 +61,7 @@ def _clear_elevation_warning(coordinator) -> None:  # type: ignore[misc]
     coordinator._last_elevation_warning_key = None
     session = coordinator.session_manager.get_session()
     if message and coordinator._status == message and (
-        session is None or session.state != coordinator.session_manager.SessionState.STREAMING
+        session is None or session.state != WorkerSessionState.STREAMING
     ):
         coordinator.set_status("空闲")
 
@@ -117,7 +118,7 @@ def _check_foreground_elevation(coordinator) -> None:  # type: ignore[misc]
     if coordinator._process_elevated:
         return
     session = coordinator.session_manager.get_session()
-    if session is not None and session.state == coordinator.session_manager.SessionState.STREAMING:
+    if session is not None and session.state == WorkerSessionState.STREAMING:
         return
     try:
         target = coordinator.injection_service.capture_target()

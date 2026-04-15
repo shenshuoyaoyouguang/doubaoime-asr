@@ -344,36 +344,38 @@ class DoubaoASR:
         )
         bytes_per_frame = samples_per_frame * 2  # 16-bit
 
-        async for chunk in audio_source:
-            if state.is_finished:
-                break
+        try:
+            async for chunk in audio_source:
+                if state.is_finished:
+                    break
 
-            pcm_buffer += chunk
+                pcm_buffer += chunk
 
-            # 当缓冲区有足够数据时，编码并发送
-            while len(pcm_buffer) >= bytes_per_frame:
-                pcm_frame = pcm_buffer[:bytes_per_frame]
-                pcm_buffer = pcm_buffer[bytes_per_frame:]
+                # 当缓冲区有足够数据时，编码并发送
+                while len(pcm_buffer) >= bytes_per_frame:
+                    pcm_frame = pcm_buffer[:bytes_per_frame]
+                    pcm_buffer = pcm_buffer[bytes_per_frame:]
 
-                # 编码为 Opus
-                opus_frame = self._encoder.encoder.encode(pcm_frame, samples_per_frame)
+                    # 编码为 Opus
+                    opus_frame = self._encoder.encoder.encode(pcm_frame, samples_per_frame)
 
-                # 确定帧状态（实时模式下不知道最后一帧，使用 FIRST/MIDDLE）
-                if frame_index == 0:
-                    frame_state = FrameState.FRAME_STATE_FIRST
-                else:
-                    frame_state = FrameState.FRAME_STATE_MIDDLE
+                    # 确定帧状态（实时模式下不知道最后一帧，使用 FIRST/MIDDLE）
+                    if frame_index == 0:
+                        frame_state = FrameState.FRAME_STATE_FIRST
+                    else:
+                        frame_state = FrameState.FRAME_STATE_MIDDLE
 
-                msg = _build_asr_request(
-                    opus_frame,
-                    state.request_id,
-                    frame_state,
-                    timestamp_ms + frame_index * self.config.frame_duration_ms,
-                )
-                await ws.send(msg)
-                frame_index += 1
-
-finally:
+                    msg = _build_asr_request(
+                        opus_frame,
+                        state.request_id,
+                        frame_state,
+                        timestamp_ms + frame_index * self.config.frame_duration_ms,
+                    )
+                    await ws.send(msg)
+                    frame_index += 1
+        except Exception:
+            pass
+        finally:
             # 【关键修复】无论正常结束还是异常中断，都必须发送结束帧和FinishSession
             # 否则服务器端会话会泄漏，导致 ExceededConcurrentQuota 错误
             if not state.is_finished and _connection_is_open(ws):

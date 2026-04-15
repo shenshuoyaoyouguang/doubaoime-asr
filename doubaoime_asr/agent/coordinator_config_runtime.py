@@ -45,6 +45,10 @@ def preview_settings_overlay(coordinator: "VoiceInputCoordinator", config: Agent
 
 async def run_preview_overlay(coordinator: "VoiceInputCoordinator", config: AgentConfig, *, preview_id: int) -> None:
     """应用临时配置并显示短暂预览。"""
+    # 如果正在录音，提前返回，避免与会话启动竞争
+    if coordinator.session_manager.is_streaming():
+        return
+
     coordinator.overlay_service.configure(config)
     try:
         await coordinator.overlay_service.show_microphone("浮层预览：请确认字号、宽度与透明度")
@@ -52,7 +56,9 @@ async def run_preview_overlay(coordinator: "VoiceInputCoordinator", config: Agen
     finally:
         with coordinator._preview_lock:
             still_latest = preview_id == coordinator._preview_counter
-        if still_latest:
+            recording = coordinator.session_manager.is_streaming()
+        # 只有当 preview 仍为最新且未开始录音时才隐藏/恢复
+        if still_latest and not recording:
             await coordinator.overlay_service.hide("settings_preview")
             coordinator.overlay_service.configure(coordinator.config)
 

@@ -15,7 +15,7 @@ from PIL import Image, ImageDraw
 if TYPE_CHECKING:
     import asyncio
 
-    from .coordinator import Coordinator
+    from .coordinator import VoiceInputCoordinator
 
 from .events import RestartAsAdminEvent
 
@@ -24,7 +24,7 @@ __all__ = [
 ]
 
 
-def start_tray(coordinator: "Coordinator", loop: asyncio.AbstractEventLoop) -> None:
+def start_tray(coordinator: "VoiceInputCoordinator", loop: asyncio.AbstractEventLoop) -> None:
     """启动系统托盘。
 
     Args:

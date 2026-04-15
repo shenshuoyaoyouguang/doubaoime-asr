@@ -24,64 +24,7 @@ __all__ = [
     "concat_transcript_text_module",
     "current_target_profile",
     "text_digest",
-    # Transcript 兼容属性
-    "segment_texts_property",
-    "finalized_segment_indexes_property",
-    "active_segment_index_property",
-    "last_displayed_raw_final_text_property",
 ]
-
-
-def _make_segment_texts_property():
-    """创建 _segment_texts 属性。"""
-    @property
-    def getter(self):
-        return self._transcript.segment_texts
-
-    @getter.setter
-    def setter(self, value):
-        self._transcript.segment_texts = value
-
-    return property(getter, setter)
-
-
-def _make_finalized_segment_indexes_property():
-    """创建 _finalized_segment_indexes 属性。"""
-    @property
-    def getter(self):
-        return self._transcript.finalized_segment_indexes
-
-    @getter.setter
-    def setter(self, value):
-        self._transcript.finalized_segment_indexes = value
-
-    return property(getter, setter)
-
-
-def _make_active_segment_index_property():
-    """创建 _active_segment_index 属性。"""
-    @property
-    def getter(self):
-        return self._transcript.active_segment_index
-
-    @getter.setter
-    def setter(self, value):
-        self._transcript.active_segment_index = value
-
-    return property(getter, setter)
-
-
-def _make_last_displayed_raw_final_text_property():
-    """创建 _last_displayed_raw_final_text 属性。"""
-    @property
-    def getter(self):
-        return self._transcript.last_displayed_raw_final_text
-
-    @getter.setter
-    def setter(self, value):
-        self._transcript.last_displayed_raw_final_text = value
-
-    return property(getter, setter)
 
 
 def _inject_transcript_property(cls):
