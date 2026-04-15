@@ -116,6 +116,13 @@ class ASRError(Exception):
         self.response = response
 
 
+class ASRTransportError(ASRError):
+    """
+    ASR 传输错误（超时等）
+    """
+    pass
+
+
 class _SessionState(BaseModel):
     """
     ASR 会话状态

@@ -211,75 +211,6 @@ class VoiceInputCoordinator:
         self._finished_event_started_at: float | None = None
         self._interim_dispatcher: DebouncedInterimDispatcher | None = None
         self._last_interim_flush_seq = 0
-        self.config = config
-        self.mode = mode or config.mode
-        self.config.mode = self.mode
-        self.enable_tray = enable_tray
-        self.console = console
-        self.launch_args = list(launch_args or [])
-
-        # 日志
-        self.logger = setup_named_logger(
-            "doubaoime_asr.agent.coordinator",
-            config.default_controller_log_path(),
-        )
-
-        # 状态
-        self._status = "空闲"
-        self._status_lock = threading.Lock()
-        self._event_queue: asyncio.Queue[VoiceInputEvent] = asyncio.Queue()
-        self._stopping = False
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._settings_controller: SettingsWindowController | None = None
-        self._pending_listener_rebind = False
-        self._pending_worker_restart = False
-        self._pending_polisher_warmup = False
-        self._polisher_warmup_task: asyncio.Task[None] | None = None
-        self._foreground_watch_task: asyncio.Task[None] | None = None
-        self._preview_lock = threading.Lock()
-        self._preview_counter = 0
-        self._transcript = TranscriptAccumulator()
-        self._session_peak_audio_level = 0.0
-        self._session_saw_audio_level = False
-        self._session_received_transcript = False
-        self._tip_gateway: TipGateway = tip_gateway or NullTipGateway()
-        self._tip_session_id: str | None = None
-        self._tip_primary_active = False
-        self._pending_service_resolved_final: ServiceResolvedFinalEvent | None = None
-        self._pending_service_fallback_reason: str | None = None
-
-        # 初始化 Services
-        session_backend = os.environ.get("DOUBAO_AGENT_SESSION_BACKEND", "").strip().lower()
-        session_manager_cls = ServiceSessionManager if session_backend == "service" else SessionManager
-        self.session_manager = session_manager_cls(
-            config,
-            self.logger,
-            on_event=self._forward_session_manager_event,
-        )
-        self.overlay_service = OverlayService(self.logger, config)
-        self.injection_service = InjectionService(self.logger, config)
-        self.hotkey_service = HotkeyService(self.logger)
-        self.text_polisher = TextPolisher(self.logger, config)
-        self._asr_preflight = ASRPreflightGate(self.logger)
-        self.capture_output_guard = SystemOutputMuteGuard(
-            self.logger,
-            policy=config.capture_output_policy,
-        )
-
-        # 进程状态
-        self._process_elevated = is_current_process_elevated() is True
-        self.injection_service.set_process_elevated(self._process_elevated)
-        self._elevation_warning_message: str | None = None
-        self._last_elevation_warning_key: tuple[int | None, int | None, str | None] | None = None
-
-        # Tray
-        self._tray_icon = None
-        self._tray_thread: threading.Thread | None = None
-
-        # 会话状态（由 _transcript 持有，兼容属性暴露旧访问路径）
-        self._finished_event_started_at: float | None = None
-        self._interim_dispatcher: DebouncedInterimDispatcher | None = None
-        self._last_interim_flush_seq = 0
 
     @property
     def _segment_texts(self) -> dict[int, str]:
@@ -505,17 +436,21 @@ class VoiceInputCoordinator:
         self._pending_service_fallback_reason = None
         self._reset_session_diagnostics()
         if self.mode == "inject" and self._tip_gateway.is_available():
-            tip_result = await self._tip_gateway.begin_session(session_id=str(session.session_id), target=target)
-            if tip_result.success:
-                self._tip_session_id = str(session.session_id)
-                self._tip_primary_active = True
-                self.logger.info("tip_primary_engaged session_id=%s", self._tip_session_id)
-            else:
-                self.logger.info(
-                    "tip_failure session_id=%s phase=begin_session reason=%s",
-                    session.session_id,
-                    tip_result.reason,
-                )
+            try:
+                tip_result = await self._tip_gateway.begin_session(session_id=str(session.session_id), target=target)
+                if tip_result.success:
+                    self._tip_session_id = str(session.session_id)
+                    self._tip_primary_active = True
+                    self.logger.info("tip_primary_engaged session_id=%s", self._tip_session_id)
+                else:
+                    self.logger.info(
+                        "tip_failure session_id=%s phase=begin_session reason=%s",
+                        session.session_id,
+                        tip_result.reason,
+                    )
+            except Exception:
+                self.logger.exception("tip_start_failed")
+                # TIP 启动失败不影响主流程，继续运行
 
         # 开始会话
         self.session_manager.begin_session(target, self.mode)

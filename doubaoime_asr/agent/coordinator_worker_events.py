@@ -5,6 +5,9 @@ Coordinator Worker Events 模块。
 """
 from __future__ import annotations
 
+import time
+
+from .config import POLISH_MODE_OFF
 from .events import (
     AudioLevelEvent,
     ErrorEvent,
@@ -185,10 +188,6 @@ async def _handle_fallback_required_event(coordinator, session, event: FallbackR
 
 async def _handle_finished_event(coordinator, session, event: FinishedEvent) -> None:
     """处理 FinishedEvent - 最复杂的处理逻辑。"""
-    import time
-
-    from .config import POLISH_MODE_OFF
-
     coordinator._finished_event_started_at = time.perf_counter()
     await coordinator._flush_interim_dispatcher(reason="finished")
     raw_text = coordinator._aggregate_session_text()
