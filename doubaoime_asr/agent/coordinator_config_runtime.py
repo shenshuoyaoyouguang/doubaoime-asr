@@ -110,7 +110,7 @@ async def apply_config(coordinator: "VoiceInputCoordinator", new_config: AgentCo
             if session_active:
                 coordinator._pending_polisher_warmup = True
             else:
-                _schedule_polisher_warmup(coordinator, "config_update")
+                coordinator._schedule_polisher_warmup("config_update")
 
         coordinator.config.save()
     except Exception:
@@ -150,40 +150,6 @@ async def apply_config(coordinator: "VoiceInputCoordinator", new_config: AgentCo
             coordinator.set_status("设置已保存")
     else:
         logger.info("settings_saved_during_active_session")
-
-
-def _schedule_polisher_warmup(coordinator: "VoiceInputCoordinator", reason: str) -> None:
-    """调度润色预热。"""
-    if coordinator._loop is None:
-        return
-    if coordinator._polisher_warmup_task is not None and not coordinator._polisher_warmup_task.done():
-        coordinator._polisher_warmup_task.cancel()
-    # 动态导入避免循环依赖
-    from .config import POLISH_MODE_OLLAMA
-
-    if coordinator.config.polish_mode != POLISH_MODE_OLLAMA or not coordinator.config.ollama_warmup_enabled:
-        coordinator._polisher_warmup_task = None
-        return
-    coordinator._polisher_warmup_task = asyncio.create_task(
-        _run_polisher_warmup(coordinator, reason),
-        name="doubao-polisher-warmup",
-    )
-
-
-async def _run_polisher_warmup(coordinator: "VoiceInputCoordinator", reason: str) -> None:
-    """执行润色预热。"""
-    try:
-        warmed = await coordinator.text_polisher.warmup()
-        coordinator.logger.info("text_polisher_warmup_finished reason=%s warmed=%s", reason, warmed)
-    except asyncio.CancelledError:
-        coordinator.logger.info("text_polisher_warmup_cancelled reason=%s", reason)
-        raise
-    except Exception:
-        coordinator.logger.exception("text_polisher_warmup_failed reason=%s", reason)
-    finally:
-        current_task = asyncio.current_task()
-        if coordinator._polisher_warmup_task is current_task:
-            coordinator._polisher_warmup_task = None
 
 
 def polisher_config_changed_wrapper(coordinator: "VoiceInputCoordinator", old_config: AgentConfig, new_config: AgentConfig) -> bool:
