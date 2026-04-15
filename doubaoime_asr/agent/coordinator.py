@@ -968,6 +968,7 @@ class VoiceInputCoordinator:
         await self._cancel_foreground_watch()
         await self._cancel_polisher_warmup()
         await self._close_interim_dispatcher()
+        self._release_capture_output()
         await self.session_manager.terminate_worker()
         self.hotkey_service.stop()
         if self._tray_icon is not None:
