@@ -6,7 +6,6 @@ VoiceInputCoordinator - 精简协调器。
 """
 from __future__ import annotations
 
-import argparse
 import asyncio
 import contextlib
 import hashlib
@@ -65,15 +64,55 @@ from .session_manager import Mode, SessionManager, WorkerSession, WorkerSessionS
 from .service_session_manager import ServiceSessionManager
 from .text_polisher import PolishResult, TextPolisher
 from .tip_gateway import NullTipGateway, TipGateway, TipGatewayResult
-from .transcript_utils import TranscriptAccumulator, concat_transcript_text
+from .transcript_utils import TranscriptAccumulator
 from .win_audio_output import AudioOutputMuteError, SystemOutputMuteGuard
 from .win_hotkey import normalize_hotkey, vk_from_hotkey, vk_to_display, vk_to_hotkey
 from .win_privileges import is_current_process_elevated, restart_as_admin
+from .coordinator_cli import build_arg_parser, build_config_from_args, normalize_cli_hotkey
+from .coordinator_config_runtime import (
+    apply_config,
+    preview_settings_overlay,
+    polisher_config_changed_wrapper,
+    run_preview_overlay,
+)
+from .coordinator_tray import start_tray
+from .coordinator_privileges import (
+    _check_foreground_elevation,
+    _clear_elevation_warning,
+    _elevation_status_message,
+    _handle_restart_as_admin,
+    _record_elevation_warning,
+    _watch_foreground_target,
+)
+from .coordinator_transcript_flow import (
+    aggregate_session_text,
+    close_interim_dispatcher,
+    concat_transcript_text_module,
+    current_target_profile,
+    ensure_interim_dispatcher,
+    flush_interim_dispatcher,
+    flush_interim_snapshot,
+    next_segment_index,
+    record_session_text,
+    resolve_segment_index,
+    submit_interim_snapshot,
+    text_digest,
+)
+from .coordinator_finalization import (
+    _inject_final,
+    _resolve_final_text,
+    _resolve_committed_text,
+    _status_for_final_result,
+    _status_for_error,
+)
+from .coordinator_worker_events import _handle_worker_event
 
 
 Mode = Literal["recognize", "inject"]
 FOREGROUND_POLL_INTERVAL_S = 0.5
 RECOGNIZE_ONLY_STATUS = "启动识别中（仅识别，不自动上屏）…"
+LOW_INPUT_AUDIO_LEVEL_THRESHOLD = 0.01
+LOW_INPUT_STATUS = "未检测到有效麦克风输入，请检查麦克风静音/增益，或在设置中切换麦克风"
 
 
 class VoiceInputCoordinator:
@@ -130,6 +169,9 @@ class VoiceInputCoordinator:
         self._preview_lock = threading.Lock()
         self._preview_counter = 0
         self._transcript = TranscriptAccumulator()
+        self._session_peak_audio_level = 0.0
+        self._session_saw_audio_level = False
+        self._session_received_transcript = False
         self._tip_gateway: TipGateway = tip_gateway or NullTipGateway()
         self._tip_session_id: str | None = None
         self._tip_primary_active = False
@@ -383,6 +425,7 @@ class VoiceInputCoordinator:
         self._tip_primary_active = False
         self._pending_service_resolved_final = None
         self._pending_service_fallback_reason = None
+        self._reset_session_diagnostics()
         if self.mode == "inject" and self._tip_gateway.is_available():
             tip_result = await self._tip_gateway.begin_session(session_id=str(session.session_id), target=target)
             if tip_result.success:
@@ -464,193 +507,7 @@ class VoiceInputCoordinator:
 
     async def _handle_worker_event(self, event: VoiceInputEvent) -> None:
         """处理 Worker 发送的事件。"""
-        session = self.session_manager.get_session()
-        if session is None:
-            return
-
-        event_type = event.event_type
-        self.logger.info("worker_event=%s", event_type)
-
-        if isinstance(event, WorkerReadyEvent):
-            session.process_ready = True
-            return
-
-        if isinstance(event, ReadyEvent):
-            if session.state == WorkerSessionState.STREAMING:
-                session.ready = True
-                self.set_status("录音中，等待说话")
-                await self._send_stop_if_needed()
-
-        elif isinstance(event, StreamingStartedEvent):
-            if session.state == WorkerSessionState.STREAMING:
-                session.streaming_started = True
-            self.logger.info(
-                "worker_streaming_started chunks=%s bytes=%s",
-                event.chunks,
-                event.bytes,
-            )
-            await self._send_stop_if_needed()
-
-        elif isinstance(event, WorkerStatusEvent):
-            if event.message:
-                self.set_status(event.message)
-
-        elif isinstance(event, AudioLevelEvent):
-            if session.state == WorkerSessionState.STREAMING:
-                await self.overlay_service.update_microphone_level(event.level)
-
-        elif isinstance(event, InterimResultEvent):
-            if session.state != WorkerSessionState.STREAMING:
-                return
-            text = self._record_session_text(event, event.text, is_final=False)
-            if self.console:
-                print(f"\r[识别中] {text}", end="", flush=True)
-            if self._tip_primary_active and self._tip_session_id is not None:
-                tip_result = await self._tip_gateway.submit_interim(session_id=self._tip_session_id, text=text)
-                if tip_result.success:
-                    self.logger.info("tip_interim_applied session_id=%s", self._tip_session_id)
-                    self.set_status(f"识别中: {text[-24:]}")
-                    return
-                await self._activate_tip_fallback(reason=tip_result.reason or "tip_interim_failed")
-            seq = await self._submit_interim_snapshot(text)
-            self.logger.info(
-                "interim_snapshot_queued seq=%s segment_index=%s len=%s digest=%s inline_enabled=%s text_profile=%s",
-                seq,
-                getattr(event, "segment_index", None),
-                len(text),
-                self._text_digest(text),
-                self.injection_service.is_inline_streaming_enabled(),
-                self._current_target_profile(),
-            )
-            self.set_status(f"识别中: {text[-24:]}")
-
-        elif isinstance(event, FinalResultEvent):
-            if session.state != WorkerSessionState.STREAMING:
-                return
-            await self._flush_interim_dispatcher(reason="final_result")
-            raw_text = self._record_session_text(event, event.text, is_final=True)
-            self._last_displayed_raw_final_text = raw_text
-            self.logger.info(
-                "final_result_received segment_index=%s len=%s digest=%s inline_enabled=%s text_profile=%s",
-                getattr(event, "segment_index", None),
-                len(raw_text),
-                self._text_digest(raw_text),
-                self.injection_service.is_inline_streaming_enabled(),
-                self._current_target_profile(),
-            )
-            if not self._tip_primary_active:
-                await self.overlay_service.submit_final(raw_text, kind="final_raw")
-                await self.injection_service.prepare_final_text(raw_text)
-            if not session.stop_sent:
-                self.set_status(f"识别中: {raw_text[-24:]}")
-
-        elif isinstance(event, ErrorEvent):
-            self._asr_preflight.invalidate()
-            if self._tip_primary_active:
-                await self._cancel_tip_session("worker_error")
-            await self.overlay_service.hide("error")
-            self.set_status(f"识别失败: {event.message}")
-            await self._clear_active_session()
-
-        elif isinstance(event, ServiceResolvedFinalEvent):
-            self._pending_service_resolved_final = event
-
-        elif isinstance(event, FallbackRequiredEvent):
-            self._pending_service_fallback_reason = event.reason or None
-
-        elif isinstance(event, FinishedEvent):
-            self._finished_event_started_at = time.perf_counter()
-            await self._flush_interim_dispatcher(reason="finished")
-            raw_text = self._aggregate_session_text()
-            if raw_text:
-                if raw_text != self._last_displayed_raw_final_text and not self._tip_primary_active:
-                    await self.overlay_service.submit_final(raw_text, kind="final_raw")
-                    self._last_displayed_raw_final_text = raw_text
-                if session.mode == "inject":
-                    self.set_status("正在准备上屏…")
-                if self._pending_service_resolved_final is not None:
-                    service_final = self._pending_service_resolved_final
-                    fallback_reason = service_final.fallback_reason or self._pending_service_fallback_reason
-                    result = PolishResult(
-                        text=service_final.text or raw_text,
-                        applied_mode=service_final.applied_mode or POLISH_MODE_OFF,
-                        latency_ms=0,
-                        fallback_reason=fallback_reason,
-                    )
-                    self.logger.info(
-                        "service_final_resolved_applied raw_digest=%s resolved_digest=%s committed_source=%s",
-                        self._text_digest(raw_text),
-                        self._text_digest(result.text),
-                        service_final.committed_source,
-                    )
-                elif self.config.polish_mode == POLISH_MODE_OFF:
-                    result = PolishResult(text=raw_text, applied_mode=POLISH_MODE_OFF, latency_ms=0)
-                    self.logger.info(
-                        "final_text_resolved mode=%s latency_ms=%d raw_digest=%s resolved_digest=%s resolved_source=%s",
-                        result.applied_mode,
-                        0,
-                        self._text_digest(raw_text),
-                        self._text_digest(result.text),
-                        "raw",
-                    )
-                else:
-                    result = await self._resolve_final_text(raw_text)
-                committed_text, committed_source = self._resolve_committed_text(raw_text, result)
-                self.logger.info(
-                    "final_commit_selected configured=%s actual=%s raw_digest=%s resolved_digest=%s committed_digest=%s",
-                    self.config.final_commit_source,
-                    committed_source,
-                    self._text_digest(raw_text),
-                    self._text_digest(result.text),
-                    self._text_digest(committed_text),
-                )
-                if committed_source == "polished" and result.text and result.text != raw_text:
-                    await self.overlay_service.submit_final(result.text, kind="final_committed")
-                self.set_status(
-                    self._status_for_final_result(
-                        result,
-                        raw_text,
-                        committed_text=committed_text,
-                        committed_source=committed_source,
-                    )
-                )
-                if self.console:
-                    print(f"\r[最终] {committed_text}          ", flush=True)
-                if (
-                    self._tip_primary_active
-                    and self._tip_session_id is not None
-                    and result.fallback_reason is None
-                ):
-                    tip_result = await self._tip_gateway.commit_resolved_final(
-                        session_id=self._tip_session_id,
-                        text=committed_text,
-                    )
-                    if tip_result.success:
-                        self.logger.info(
-                            "tip_success session_id=%s committed_digest=%s",
-                            self._tip_session_id,
-                            self._text_digest(committed_text),
-                        )
-                    else:
-                        fallback_ready = await self._activate_tip_fallback(
-                            reason=tip_result.reason or ("tip_timeout" if tip_result.timeout else "tip_failure")
-                        )
-                        if fallback_ready:
-                            await self._inject_final(committed_text)
-                else:
-                    if self._tip_primary_active:
-                        fallback_ready = await self._activate_tip_fallback(
-                            reason=result.fallback_reason or "tip_commit_unavailable"
-                        )
-                        if fallback_ready:
-                            await self._inject_final(committed_text)
-                    else:
-                        await self._inject_final(committed_text)
-            await self.overlay_service.hide("finished")
-            if not raw_text and not self._status.startswith("识别失败"):
-                self.set_status("空闲")
-            await self._clear_active_session()
-            self._finished_event_started_at = None
+        await _handle_worker_event(self, event)
 
     async def _send_stop_if_needed(self) -> None:
         """延迟发送 STOP（如果需要）。"""
@@ -663,57 +520,11 @@ class VoiceInputCoordinator:
 
     async def _inject_final(self, text: str) -> None:
         """执行最终文本注入。"""
-        if not text:
-            return
-        session = self.session_manager.get_session()
-        if session is None:
-            return
-        if session.mode != "inject":
-            self.logger.info("inject_skipped reason=recognize_mode text_length=%s", len(text))
-            return
-        if self.injection_service.is_injection_blocked():
-            return
-
-        inject_started_at = time.perf_counter()
-        try:
-            result = await self.injection_service.inject_final(text)
-            if result:
-                finished_to_inject_ms = None
-                stop_to_inject_ms = None
-                if self._finished_event_started_at is not None:
-                    finished_to_inject_ms = int((inject_started_at - self._finished_event_started_at) * 1000)
-                if session.stop_sent_at is not None:
-                    stop_to_inject_ms = int((inject_started_at - session.stop_sent_at) * 1000)
-                self.logger.info(
-                    "inject_success method=%s stop_to_inject_ms=%s finished_to_inject_ms=%s",
-                    result.method,
-                    stop_to_inject_ms,
-                    finished_to_inject_ms,
-                )
-        except FocusChangedError:
-            self.injection_service.handle_focus_changed()
-            self.logger.warning("inject_focus_changed")
-            self.set_status("焦点已变化，仅保留识别")
-        except Exception:
-            self.logger.exception("inject_final_failed")
-            self.set_status("注入失败，仅保留识别")
+        await _inject_final(self, text)
 
     async def _resolve_final_text(self, raw_text: str) -> PolishResult:
         """润色最终文本。"""
-        resolve_started_at = time.perf_counter()
-        if self.config.polish_mode == POLISH_MODE_OLLAMA and raw_text.strip():
-            self.set_status("润色中…")
-        result = await self.text_polisher.polish(raw_text)
-        resolved_source = "raw" if result.text == raw_text else "polished"
-        self.logger.info(
-            "final_text_resolved mode=%s latency_ms=%d raw_digest=%s resolved_digest=%s resolved_source=%s",
-            result.applied_mode,
-            int((time.perf_counter() - resolve_started_at) * 1000),
-            self._text_digest(raw_text),
-            self._text_digest(result.text),
-            resolved_source,
-        )
-        return result
+        return await _resolve_final_text(self, raw_text)
 
     # ===== 会话状态管理 =====
 
@@ -725,85 +536,66 @@ class VoiceInputCoordinator:
         is_final: bool,
     ) -> str:
         """记录分段文本。"""
-        return self._transcript.record_text(
-            text,
-            segment_index=getattr(event, "segment_index", None),
-            is_final=is_final,
-        )
+        return record_session_text(self, event, text, is_final=is_final)
 
     def _resolve_segment_index(self, event: VoiceInputEvent, *, is_final: bool) -> int:
         """解析分段索引。"""
-        return self._transcript.resolve_segment_index(
-            getattr(event, "segment_index", None),
-            is_final=is_final,
-        )
+        return resolve_segment_index(self, event, is_final=is_final)
 
     def _next_segment_index(self) -> int:
         """获取下一个分段索引。"""
-        return self._transcript.next_segment_index()
+        return next_segment_index(self)
 
     def _aggregate_session_text(self) -> str:
         """聚合分段文本。"""
-        return self._transcript.aggregate_text()
+        return aggregate_session_text(self)
 
     async def _submit_interim_snapshot(self, text: str) -> int:
-        dispatcher = self._ensure_interim_dispatcher()
-        return await dispatcher.submit(text)
+        return await submit_interim_snapshot(self, text)
 
     async def _flush_interim_snapshot(self, seq: int, text: str) -> None:
-        self._last_interim_flush_seq = seq
-        self.logger.info(
-            "interim_snapshot_flushed seq=%s len=%s digest=%s inline_enabled=%s text_profile=%s",
-            seq,
-            len(text),
-            self._text_digest(text),
-            self.injection_service.is_inline_streaming_enabled(),
-            self._current_target_profile(),
-        )
-        await self.overlay_service.submit_interim(text)
-        await self.injection_service.apply_inline_interim(text)
+        await flush_interim_snapshot(self, seq, text)
 
     async def _flush_interim_dispatcher(self, *, reason: str) -> None:
-        if self._interim_dispatcher is None:
-            return
-        await self._interim_dispatcher.flush(reason=reason)
+        await flush_interim_dispatcher(self, reason=reason)
 
     async def _close_interim_dispatcher(self) -> None:
-        if self._interim_dispatcher is None:
-            return
-        await self._interim_dispatcher.close()
-        self._interim_dispatcher = None
+        await close_interim_dispatcher(self)
 
     def _ensure_interim_dispatcher(self) -> DebouncedInterimDispatcher:
-        if self._interim_dispatcher is None:
-            self._interim_dispatcher = DebouncedInterimDispatcher(
-                debounce_ms=self.config.render_debounce_ms,
-                logger=self.logger,
-                on_flush=self._flush_interim_snapshot,
-            )
-        return self._interim_dispatcher
+        return ensure_interim_dispatcher(self)
 
     def _current_target_profile(self) -> str:
-        target = self.injection_service.get_current_target()
-        if target is None:
-            return "none"
-        return target.text_input_profile
+        return current_target_profile(self)
 
     def _text_digest(self, text: str) -> str:
-        if not text:
-            return "empty"
-        return hashlib.sha1(text.encode("utf-8")).hexdigest()[:10]
+        return text_digest(text)
+
+    def _reset_session_diagnostics(self) -> None:
+        self._session_peak_audio_level = 0.0
+        self._session_saw_audio_level = False
+        self._session_received_transcript = False
+
+    def _record_audio_level(self, level: float) -> None:
+        self._session_saw_audio_level = True
+        self._session_peak_audio_level = max(
+            self._session_peak_audio_level,
+            max(0.0, float(level)),
+        )
+
+    def _should_warn_low_input(self) -> bool:
+        return (
+            self._session_saw_audio_level
+            and not self._session_received_transcript
+            and self._session_peak_audio_level < LOW_INPUT_AUDIO_LEVEL_THRESHOLD
+        )
 
     def _resolve_committed_text(self, raw_text: str, result: PolishResult) -> tuple[str, str]:
-        if self.config.final_commit_source == FINAL_COMMIT_SOURCE_RAW:
-            return raw_text, "raw"
-        committed_text = result.text or raw_text
-        committed_source = "raw" if committed_text == raw_text else "polished"
-        return committed_text, committed_source
+        return _resolve_committed_text(self, raw_text, result)
 
     def _concat_transcript_text(self, current: str, incoming: str) -> str:
         """拼接文本，处理重叠。"""
-        return concat_transcript_text(current, incoming)
+        return concat_transcript_text_module(current, incoming)
 
     # ===== Worker 退出处理 =====
 
@@ -849,6 +641,7 @@ class VoiceInputCoordinator:
         self._tip_primary_active = False
         self._pending_service_resolved_final = None
         self._pending_service_fallback_reason = None
+        self._reset_session_diagnostics()
         restore_warning = self._release_capture_output()
         if restore_warning is not None:
             self.set_status(restore_warning)
@@ -903,209 +696,47 @@ class VoiceInputCoordinator:
 
     def _preview_settings_overlay(self, config: AgentConfig) -> None:
         """在设置页预览浮层样式。"""
-        if self._loop is None:
-            return
-        if self.session_manager.is_streaming():
-            self.set_status("录音中，暂不预览浮层")
-            return
-        with self._preview_lock:
-            self._preview_counter += 1
-            preview_id = self._preview_counter
-        self._emit_threadsafe(self._loop, ConfigChangeEvent(config=config, preview_id=preview_id, preview_only=True))
+        preview_settings_overlay(self, config)
 
     async def _run_preview_overlay(self, config: AgentConfig, *, preview_id: int) -> None:
         """应用临时配置并显示短暂预览。"""
-        self.overlay_service.configure(config)
-        try:
-            await self.overlay_service.show_microphone("浮层预览：请确认字号、宽度与透明度")
-            await asyncio.sleep(1.2)
-        finally:
-            with self._preview_lock:
-                still_latest = preview_id == self._preview_counter
-            if still_latest:
-                await self.overlay_service.hide("settings_preview")
-                self.overlay_service.configure(self.config)
+        await run_preview_overlay(self, config, preview_id=preview_id)
 
     # ===== 配置更新 =====
 
     async def _apply_config(self, new_config: AgentConfig) -> None:
         """应用新配置。"""
-        old_config = self.config
-        if old_config.credential_path != new_config.credential_path:
-            self._asr_preflight.invalidate()
-        old_mode = self.mode
-        old_pending_listener_rebind = self._pending_listener_rebind
-        old_pending_worker_restart = self._pending_worker_restart
-        old_pending_polisher_warmup = self._pending_polisher_warmup
-
-        update_plan = build_config_update_plan(old_config, new_config)
-        hotkey_changed = update_plan.hotkey_changed
-        worker_changed = update_plan.worker_changed
-        polisher_changed = update_plan.polisher_changed
-        session_active = self.session_manager.is_streaming()
-        listener_rebound = False
-        worker_restarted = False
-
-        try:
-            self.config = new_config
-            self.mode = new_config.mode
-
-            # 更新各 Service
-            self.session_manager.config = new_config
-            self.overlay_service.configure(new_config)
-            self.injection_service.configure(new_config)
-            self.text_polisher.configure(new_config)
-            self.capture_output_guard.configure(new_config.capture_output_policy)
-
-            if hotkey_changed:
-                if session_active:
-                    self._pending_listener_rebind = True
-                else:
-                    self.hotkey_service.update_hotkey(new_config.effective_hotkey_vk())
-                    listener_rebound = True
-
-            if worker_changed:
-                if session_active:
-                    self._pending_worker_restart = True
-                else:
-                    await self.session_manager.restart_worker()
-                    worker_restarted = True
-
-            if polisher_changed:
-                if session_active:
-                    self._pending_polisher_warmup = True
-                else:
-                    self._schedule_polisher_warmup("config_update")
-
-            self.config.save()
-        except Exception:
-            self.logger.exception("apply_config_failed")
-            # 回滚
-            self.config = old_config
-            self.mode = old_mode
-            self._pending_listener_rebind = old_pending_listener_rebind
-            self._pending_worker_restart = old_pending_worker_restart
-            self._pending_polisher_warmup = old_pending_polisher_warmup
-            self.session_manager.config = old_config
-            self.overlay_service.configure(old_config)
-            self.injection_service.configure(old_config)
-            self.text_polisher.configure(old_config)
-            self.capture_output_guard.configure(old_config.capture_output_policy)
-            if listener_rebound:
-                self.hotkey_service.update_hotkey(old_config.effective_hotkey_vk())
-            if worker_restarted:
-                await self.session_manager.restart_worker()
-            with contextlib.suppress(Exception):
-                self.config.save()
-            self.set_status("设置保存失败，已恢复旧配置")
-            return
-
-        if self._tray_icon is not None:
-            with contextlib.suppress(Exception):
-                self._tray_icon.update_menu()
-
-        if not session_active:
-            if hotkey_changed:
-                self.set_status(f"热键已更新为 {new_config.effective_hotkey_display()}")
-            elif worker_changed:
-                self.set_status("设置已保存并重启识别服务")
-            elif polisher_changed:
-                self.set_status("设置已保存并更新润色配置")
-            else:
-                self.set_status("设置已保存")
-        else:
-            self.logger.info("settings_saved_during_active_session")
+        await apply_config(self, new_config, self.logger)
 
     def _polisher_config_changed(self, old_config: AgentConfig, new_config: AgentConfig) -> bool:
         """检查润色配置是否变化。"""
-        return polisher_config_changed(old_config, new_config)
+        return polisher_config_changed_wrapper(self, old_config, new_config)
 
     # ===== 管理员权限处理 =====
 
     def _record_elevation_warning(self, target: FocusTarget, *, log_tag: str) -> None:
         """记录管理员权限警告。"""
-        message = self._elevation_status_message(target)
-        key = (target.hwnd, target.process_id, target.process_name)
-        if key != self._last_elevation_warning_key:
-            self.logger.warning(
-                "%s hwnd=%s pid=%s process=%s terminal=%s elevated=%s",
-                log_tag,
-                target.hwnd,
-                target.process_id,
-                target.process_name,
-                target.terminal_kind,
-                target.is_elevated,
-            )
-            self._last_elevation_warning_key = key
-        self._elevation_warning_message = message
-        self.set_status(message)
+        _record_elevation_warning(self, target, log_tag=log_tag)
 
     def _clear_elevation_warning(self) -> None:
         """清除管理员权限警告。"""
-        message = self._elevation_warning_message
-        self._elevation_warning_message = None
-        self._last_elevation_warning_key = None
-        session = self.session_manager.get_session()
-        if message and self._status == message and (session is None or session.state != WorkerSessionState.STREAMING):
-            self.set_status("空闲")
+        _clear_elevation_warning(self)
 
     def _elevation_status_message(self, target: FocusTarget) -> str:
         """生成管理员权限状态消息。"""
-        subject = "管理员终端" if target.is_terminal else "管理员窗口"
-        if self.enable_tray:
-            return f"{subject}需要以管理员身份运行代理；请从托盘选择\"以管理员重启\""
-        return f"{subject}需要以管理员身份运行代理；请重新以管理员身份启动代理"
+        return _elevation_status_message(self, target)
 
     async def _handle_restart_as_admin(self) -> None:
         """处理管理员重启请求。"""
-        if self._process_elevated:
-            self.set_status("代理已在管理员模式运行")
-            return
-        try:
-            restarted = restart_as_admin(
-                self.launch_args,
-                executable=sys.executable,
-                frozen=bool(getattr(sys, "frozen", False)),
-            )
-        except Exception:
-            self.logger.exception("restart_as_admin_failed")
-            self.set_status("管理员重启失败，请查看 controller.log")
-            return
-        if not restarted:
-            self.logger.warning("restart_as_admin_declined")
-            self.set_status("管理员重启已取消或被系统拒绝")
-            return
-        self.logger.info("restart_as_admin_requested args=%s", self.launch_args)
-        self.set_status("正在以管理员身份重启…")
-        self.stop()
+        await _handle_restart_as_admin(self)
 
     async def _watch_foreground_target(self) -> None:
         """监控前景窗口权限。"""
-        try:
-            while not self._stopping:
-                self._check_foreground_elevation()
-                await asyncio.sleep(FOREGROUND_POLL_INTERVAL_S)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            self.logger.exception("foreground_watch_failed")
+        await _watch_foreground_target(self)
 
     def _check_foreground_elevation(self) -> None:
         """检查前景窗口是否需要管理员权限。"""
-        if self._process_elevated:
-            return
-        session = self.session_manager.get_session()
-        if session is not None and session.state == WorkerSessionState.STREAMING:
-            return
-        try:
-            target = self.injection_service.capture_target()
-        except Exception:
-            self.logger.exception("foreground_target_capture_failed")
-            return
-        if self.injection_service.target_requires_admin(target):
-            self._record_elevation_warning(target, log_tag="foreground_elevated_target_detected")
-            return
-        self._clear_elevation_warning()
+        _check_foreground_elevation(self)
 
     # ===== 辅助方法 =====
 
@@ -1154,23 +785,16 @@ class VoiceInputCoordinator:
         committed_source: str | None = None,
     ) -> str:
         """生成最终结果状态。"""
-        resolved_committed_text = committed_text if committed_text is not None else result.text
-        resolved_committed_source = (
-            committed_source if committed_source is not None else ("raw" if resolved_committed_text == raw_text else "polished")
+        return _status_for_final_result(
+            self,
+            result,
+            raw_text,
+            committed_text=committed_text,
+            committed_source=committed_source,
         )
-        if result.applied_mode != "raw_fallback":
-            if resolved_committed_source == "raw" and result.text != raw_text:
-                return f"最终提交原文: {resolved_committed_text[-24:]}"
-            return f"最终结果: {resolved_committed_text[-24:]}"
-        excerpt = raw_text[-18:]
-        fallback_messages = {
-            "timeout": f"润色超时，已使用原文: {excerpt}",
-            "unavailable": f"润色不可用，已使用原文: {excerpt}",
-            "no_model": f"未配置润色模型，已使用原文: {excerpt}",
-            "invalid_response": f"润色结果无效，已使用原文: {excerpt}",
-            "bad_prompt": f"润色提示词无效，已使用原文: {excerpt}",
-        }
-        return fallback_messages.get(result.fallback_reason or "", f"最终结果: {result.text[-24:]}")
+
+    def _status_for_error(self, message: str) -> str:
+        return _status_for_error(self, message)
 
     def _mode_display_label(self, mode: Mode | None = None) -> str:
         """生成模式显示标签。"""
@@ -1276,177 +900,4 @@ class VoiceInputCoordinator:
 
     def _start_tray(self, loop: asyncio.AbstractEventLoop) -> None:
         """启动系统托盘。"""
-        import pystray
-        from PIL import Image, ImageDraw
-
-        def build_icon():
-            image = Image.new("RGBA", (64, 64), (20, 20, 20, 0))
-            draw = ImageDraw.Draw(image)
-            draw.rounded_rectangle((8, 8, 56, 56), radius=12, fill=(38, 110, 255, 255))
-            draw.rectangle((26, 18, 38, 42), fill=(255, 255, 255, 255))
-            draw.ellipse((22, 12, 42, 28), fill=(255, 255, 255, 255))
-            draw.rectangle((22, 44, 42, 48), fill=(255, 255, 255, 255))
-            return image
-
-        def open_log_dir(icon=None, item=None):
-            path = self.config.default_log_dir()
-            path.mkdir(parents=True, exist_ok=True)
-            os.startfile(path)
-
-        def open_settings(icon=None, item=None):
-            if self._settings_controller is not None:
-                self._settings_controller.show(self.config)
-
-        def stop_app(icon=None, item=None):
-            loop.call_soon_threadsafe(self.stop)
-
-        def restart_app_as_admin(icon=None, item=None):
-            self._emit_threadsafe(loop, RestartAsAdminEvent())
-
-        icon = pystray.Icon(
-            "doubao-voice-agent",
-            build_icon(),
-            "Doubao Voice Input",
-            menu=pystray.Menu(
-                pystray.MenuItem(lambda item: f"状态: {self._status}", None, enabled=False),
-                pystray.MenuItem(lambda item: f"模式: {self._mode_display_label()}", None, enabled=False),
-                pystray.MenuItem(lambda item: f"热键: {self.config.effective_hotkey_display()}", None, enabled=False),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem("以管理员重启", restart_app_as_admin, enabled=lambda item: not self._process_elevated),
-                pystray.MenuItem("设置", open_settings),
-                pystray.MenuItem("打开日志目录", open_log_dir),
-                pystray.MenuItem("退出", stop_app),
-            ),
-        )
-        self._tray_icon = icon
-        self._tray_thread = threading.Thread(target=icon.run, name="doubao-tray", daemon=True)
-        self._tray_thread.start()
-
-
-# ===== CLI 入口（兼容原有接口） =====
-
-
-def build_arg_parser() -> argparse.ArgumentParser:
-    """构建命令行参数解析器。"""
-    parser = argparse.ArgumentParser(description="Doubao 语音输入全局版")
-    parser.add_argument(
-        "--mode",
-        choices=("recognize", "inject"),
-        default=argparse.SUPPRESS,
-        help="recognize 仅识别；inject 识别后尝试写入当前焦点输入框",
-    )
-    parser.add_argument("--hotkey", help="覆盖默认热键，例如 right_ctrl / f9 / space")
-    parser.add_argument("--mic-device", help="覆盖麦克风设备名称或索引")
-    parser.add_argument("--credential-path", help="覆盖凭据文件路径")
-    parser.add_argument(
-        "--injection-policy",
-        choices=SUPPORTED_INJECTION_POLICIES,
-        default=argparse.SUPPRESS,
-        help="direct_only 仅直接输入；direct_then_clipboard 失败时允许剪贴板回退",
-    )
-    parser.add_argument(
-        "--streaming-text-mode",
-        choices=SUPPORTED_STREAMING_TEXT_MODES,
-        default=argparse.SUPPRESS,
-        help="safe_inline 安全编辑框实时上屏；overlay_only 仅显示浮层",
-    )
-    parser.add_argument(
-        "--final-commit-source",
-        choices=SUPPORTED_FINAL_COMMIT_SOURCES,
-        default=argparse.SUPPRESS,
-        help="polished 提交润色结果（兼容当前行为）；raw 提交原始识别结果",
-    )
-    parser.add_argument(
-        "--capture-output-policy",
-        choices=SUPPORTED_CAPTURE_OUTPUT_POLICIES,
-        default=argparse.SUPPRESS,
-        help="off 保持现状；mute_system_output 在录音期间静音系统输出",
-    )
-    parser.add_argument(
-        "--polish-mode",
-        choices=SUPPORTED_POLISH_MODES,
-        default=argparse.SUPPRESS,
-        help="light 轻量整理（推荐）；off 关闭；ollama 使用本地 Ollama 模型润色最终结果（较慢）",
-    )
-    parser.add_argument("--ollama-base-url", help="本地 Ollama 服务地址，默认 http://localhost:11434")
-    parser.add_argument("--ollama-model", help="本地 Ollama 模型名，为空时仅在唯一模型场景下自动探测")
-    parser.add_argument("--polish-timeout-ms", type=int, help="最终结果润色超时毫秒数")
-    parser.add_argument("--ollama-keep-alive", help="Ollama 模型保温时长，例如 15m")
-    parser.add_argument("--disable-ollama-warmup", action="store_true", help="关闭程序启动后的 Ollama 模型预热")
-    parser.add_argument("--render-debounce-ms", type=int, help="流式渲染防抖毫秒数")
-    parser.add_argument("--worker-ready-timeout-ms", type=int, help="Worker 热启动就绪超时毫秒数")
-    parser.add_argument("--worker-cold-ready-timeout-ms", type=int, help="Worker 冷启动就绪超时毫秒数")
-    parser.add_argument("--worker-exit-grace-timeout-ms", type=int, help="Worker 优雅退出等待毫秒数")
-    parser.add_argument("--worker-kill-wait-timeout-ms", type=int, help="Worker 强制终止后等待毫秒数")
-    parser.add_argument("--console", action="store_true", help="显示控制台输出，便于调试")
-    parser.add_argument("--no-tray", action="store_true", help="禁用系统托盘，仅作为前台常驻工具运行")
-    return parser
-
-
-def build_config_from_args(args: argparse.Namespace | None = None) -> AgentConfig:
-    """从命令行参数构建配置。"""
-    if args is None:
-        parser = build_arg_parser()
-        args = parser.parse_args()
-
-    config = AgentConfig.load()
-    if getattr(args, "mode", None):
-        config.mode = args.mode
-    if getattr(args, "hotkey", None):
-        hotkey = str(args.hotkey)
-        hotkey_vk = vk_from_hotkey(hotkey)
-        config.hotkey = normalize_cli_hotkey(hotkey_vk)
-        config.hotkey_vk = hotkey_vk
-        config.hotkey_display = vk_to_display(hotkey_vk)
-    if getattr(args, "mic_device", None):
-        config.microphone_device = (
-            int(args.mic_device)
-            if str(args.mic_device).isdigit()
-            else args.mic_device
-        )
-    if getattr(args, "credential_path", None):
-        config.credential_path = args.credential_path
-    if getattr(args, "injection_policy", None):
-        config.injection_policy = args.injection_policy
-    if getattr(args, "streaming_text_mode", None):
-        config.streaming_text_mode = args.streaming_text_mode
-    if getattr(args, "final_commit_source", None):
-        config.final_commit_source = args.final_commit_source
-    if getattr(args, "capture_output_policy", None):
-        config.capture_output_policy = args.capture_output_policy
-    if getattr(args, "polish_mode", None):
-        config.polish_mode = args.polish_mode
-    if getattr(args, "ollama_base_url", None):
-        config.ollama_base_url = str(args.ollama_base_url).strip().rstrip("/") or config.ollama_base_url
-    if getattr(args, "ollama_model", None) is not None:
-        config.ollama_model = str(args.ollama_model).strip()
-    if getattr(args, "polish_timeout_ms", None) is not None:
-        config.polish_timeout_ms = args.polish_timeout_ms
-    if getattr(args, "ollama_keep_alive", None):
-        config.ollama_keep_alive = args.ollama_keep_alive
-    if getattr(args, "disable_ollama_warmup", False):
-        config.ollama_warmup_enabled = False
-    if getattr(args, "render_debounce_ms", None) is not None:
-        config.render_debounce_ms = args.render_debounce_ms
-    if getattr(args, "worker_ready_timeout_ms", None) is not None:
-        config.worker_ready_timeout_ms = args.worker_ready_timeout_ms
-    if getattr(args, "worker_cold_ready_timeout_ms", None) is not None:
-        config.worker_cold_ready_timeout_ms = args.worker_cold_ready_timeout_ms
-    if getattr(args, "worker_exit_grace_timeout_ms", None) is not None:
-        config.worker_exit_grace_timeout_ms = args.worker_exit_grace_timeout_ms
-    if getattr(args, "worker_kill_wait_timeout_ms", None) is not None:
-        config.worker_kill_wait_timeout_ms = args.worker_kill_wait_timeout_ms
-    return config
-
-
-def normalize_cli_hotkey(hotkey_vk: int) -> str:
-    """规范化 CLI 热键。"""
-    return vk_to_hotkey(hotkey_vk) or normalize_hotkey(vk_to_display(hotkey_vk))
-
-
-__all__ = [
-    "VoiceInputCoordinator",
-    "build_arg_parser",
-    "build_config_from_args",
-    "normalize_cli_hotkey",
-]
+        start_tray(self, loop)

@@ -9,6 +9,7 @@ import uuid
 from pydantic import BaseModel, Field
 import websockets
 from websockets import ClientConnection
+from websockets.protocol import State
 
 from .config import ASRConfig
 from .audio import AudioEncoder
@@ -67,6 +68,20 @@ class _SessionState(BaseModel):
     transport_closed_unexpectedly: bool = False
     received_final: bool = False
     received_session_finished: bool = False
+
+
+def _connection_is_open(ws: ClientConnection) -> bool:
+    closed = getattr(ws, "closed", None)
+    if isinstance(closed, bool):
+        return not closed
+
+    state = getattr(ws, "state", None)
+    if state is None:
+        return True
+    try:
+        return state == State.OPEN
+    except Exception:
+        return True
 
 
 def _latency_ms(started_at: float) -> int:
@@ -219,9 +234,17 @@ class DoubaoASR:
                 )
 
                 try:
-                    # 实时模式不使用超时，依靠 WebSocket 层检测断开
                     while True:
-                        resp = await response_queue.get()
+                        if send_task.done():
+                            send_exc = send_task.exception()
+                            if send_exc is not None:
+                                raise send_exc
+                            resp = await asyncio.wait_for(
+                                response_queue.get(),
+                                timeout=self.config.recv_timeout,
+                            )
+                        else:
+                            resp = await response_queue.get()
                         if resp is None:
                             break
 
@@ -233,6 +256,10 @@ class DoubaoASR:
                             break
 
                     await send_task
+                except asyncio.TimeoutError as exc:
+                    raise ASRTransportError(
+                        f"等待最终结果超时({self.config.recv_timeout:.1f}s)"
+                    ) from exc
                 finally:
                     send_task.cancel()
                     recv_task.cancel()
@@ -306,8 +333,8 @@ class DoubaoASR:
         finally:
             # 【关键修复】无论正常结束还是异常中断，都必须发送结束帧和FinishSession
             # 否则服务器端会话会泄漏，导致 ExceededConcurrentQuota 错误
-            with contextlib.suppress(Exception):
-                if not state.is_finished and not ws.closed:
+            if not state.is_finished and _connection_is_open(ws):
+                try:
                     if pcm_buffer:
                         # 处理剩余数据
                         if len(pcm_buffer) < bytes_per_frame:
@@ -334,6 +361,8 @@ class DoubaoASR:
 
                     # 发送FinishSession，这是最重要的！
                     await ws.send(_build_finish_session(state.request_id, self.config.get_token()))
+                except (websockets.exceptions.WebSocketException, OSError, RuntimeError):
+                    pass
     
     async def _initialize_session(self, ws: ClientConnection, state: _SessionState) -> AsyncIterator[ASRResponse]:
         """
