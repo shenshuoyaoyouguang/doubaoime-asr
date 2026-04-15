@@ -33,6 +33,7 @@ def start_tray(coordinator: "Coordinator", loop: asyncio.AbstractEventLoop) -> N
     """
     # 本地函数：构建托盘图标
     def build_icon() -> Image.Image:
+        """构建托盘图标图像。"""
         image = Image.new("RGBA", (64, 64), (20, 20, 20, 0))
         draw = ImageDraw.Draw(image)
         draw.rounded_rectangle((8, 8, 56, 56), radius=12, fill=(38, 110, 255, 255))
@@ -43,21 +44,25 @@ def start_tray(coordinator: "Coordinator", loop: asyncio.AbstractEventLoop) -> N
 
     # 本地函数：打开日志目录
     def open_log_dir(icon: pystray.Icon | None = None, item: pystray.MenuItem | None = None) -> None:
+        """打开日志目录。"""
         path = coordinator.config.default_log_dir()
         path.mkdir(parents=True, exist_ok=True)
         os.startfile(path)
 
     # 本地函数：打开设置窗口
     def open_settings(icon: pystray.Icon | None = None, item: pystray.MenuItem | None = None) -> None:
+        """打开设置窗口。"""
         if coordinator._settings_controller is not None:
             coordinator._settings_controller.show(coordinator.config)
 
     # 本地函数：停止应用
     def stop_app(icon: pystray.Icon | None = None, item: pystray.MenuItem | None = None) -> None:
+        """停止应用。"""
         loop.call_soon_threadsafe(coordinator.stop)
 
     # 本地函数：以管理员重启
     def restart_app_as_admin(icon: pystray.Icon | None = None, item: pystray.MenuItem | None = None) -> None:
+        """以管理员身份重启应用。"""
         coordinator._emit_threadsafe(loop, RestartAsAdminEvent())
 
     # 创建托盘图标

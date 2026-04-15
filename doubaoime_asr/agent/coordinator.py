@@ -141,6 +141,76 @@ class VoiceInputCoordinator:
         launch_args: list[str] | None = None,
         tip_gateway: TipGateway | None = None,
     ) -> None:
+        """初始化 Coordinator。"""
+        self.config = config
+        self.mode = mode or config.mode
+        self.config.mode = self.mode
+        self.enable_tray = enable_tray
+        self.console = console
+        self.launch_args = list(launch_args or [])
+
+        # 日志
+        self.logger = setup_named_logger(
+            "doubaoime_asr.agent.coordinator",
+            config.default_controller_log_path(),
+        )
+
+        # 状态
+        self._status = "空闲"
+        self._status_lock = threading.Lock()
+        self._event_queue: asyncio.Queue[VoiceInputEvent] = asyncio.Queue()
+        self._stopping = False
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._settings_controller: SettingsWindowController | None = None
+        self._pending_listener_rebind = False
+        self._pending_worker_restart = False
+        self._pending_polisher_warmup = False
+        self._polisher_warmup_task: asyncio.Task[None] | None = None
+        self._foreground_watch_task: asyncio.Task[None] | None = None
+        self._preview_lock = threading.Lock()
+        self._preview_counter = 0
+        self._transcript = TranscriptAccumulator()
+        self._session_peak_audio_level = 0.0
+        self._session_saw_audio_level = False
+        self._session_received_transcript = False
+        self._tip_gateway: TipGateway = tip_gateway or NullTipGateway()
+        self._tip_session_id: str | None = None
+        self._tip_primary_active = False
+        self._pending_service_resolved_final: ServiceResolvedFinalEvent | None = None
+        self._pending_service_fallback_reason: str | None = None
+
+        # 初始化 Services
+        session_backend = os.environ.get("DOUBAO_AGENT_SESSION_BACKEND", "").strip().lower()
+        session_manager_cls = ServiceSessionManager if session_backend == "service" else SessionManager
+        self.session_manager = session_manager_cls(
+            config,
+            self.logger,
+            on_event=self._forward_session_manager_event,
+        )
+        self.overlay_service = OverlayService(self.logger, config)
+        self.injection_service = InjectionService(self.logger, config)
+        self.hotkey_service = HotkeyService(self.logger)
+        self.text_polisher = TextPolisher(self.logger, config)
+        self._asr_preflight = ASRPreflightGate(self.logger)
+        self.capture_output_guard = SystemOutputMuteGuard(
+            self.logger,
+            policy=config.capture_output_policy,
+        )
+
+        # 进程状态
+        self._process_elevated = is_current_process_elevated() is True
+        self.injection_service.set_process_elevated(self._process_elevated)
+        self._elevation_warning_message: str | None = None
+        self._last_elevation_warning_key: tuple[int | None, int | None, str | None] | None = None
+
+        # Tray
+        self._tray_icon = None
+        self._tray_thread: threading.Thread | None = None
+
+        # 会话状态（由 _transcript 持有，兼容属性暴露旧访问路径）
+        self._finished_event_started_at: float | None = None
+        self._interim_dispatcher: DebouncedInterimDispatcher | None = None
+        self._last_interim_flush_seq = 0
         self.config = config
         self.mode = mode or config.mode
         self.config.mode = self.mode
@@ -213,34 +283,42 @@ class VoiceInputCoordinator:
 
     @property
     def _segment_texts(self) -> dict[int, str]:
+        """分段文本集合。"""
         return self._transcript.segment_texts
 
     @_segment_texts.setter
     def _segment_texts(self, value: dict[int, str]) -> None:
+        """设置分段文本集合。"""
         self._transcript.segment_texts = value
 
     @property
     def _finalized_segment_indexes(self) -> set[int]:
+        """已完成的分段索引集合。"""
         return self._transcript.finalized_segment_indexes
 
     @_finalized_segment_indexes.setter
     def _finalized_segment_indexes(self, value: set[int]) -> None:
+        """设置已完成的分段索引集合。"""
         self._transcript.finalized_segment_indexes = value
 
     @property
     def _active_segment_index(self) -> int | None:
+        """当前活跃分段索引。"""
         return self._transcript.active_segment_index
 
     @_active_segment_index.setter
     def _active_segment_index(self, value: int | None) -> None:
+        """设置当前活跃分段索引。"""
         self._transcript.active_segment_index = value
 
     @property
     def _last_displayed_raw_final_text(self) -> str:
+        """最后显示的原始最终文本。"""
         return self._transcript.last_displayed_raw_final_text
 
     @_last_displayed_raw_final_text.setter
     def _last_displayed_raw_final_text(self, value: str) -> None:
+        """设置最后显示的原始最终文本。"""
         self._transcript.last_displayed_raw_final_text = value
 
     # ===== 状态管理 =====
@@ -551,32 +629,41 @@ class VoiceInputCoordinator:
         return aggregate_session_text(self)
 
     async def _submit_interim_snapshot(self, text: str) -> int:
+        """提交临时结果快照。"""
         return await submit_interim_snapshot(self, text)
 
     async def _flush_interim_snapshot(self, seq: int, text: str) -> None:
+        """刷新临时结果快照。"""
         await flush_interim_snapshot(self, seq, text)
 
     async def _flush_interim_dispatcher(self, *, reason: str) -> None:
+        """刷新临时结果调度器。"""
         await flush_interim_dispatcher(self, reason=reason)
 
     async def _close_interim_dispatcher(self) -> None:
+        """关闭临时结果调度器。"""
         await close_interim_dispatcher(self)
 
     def _ensure_interim_dispatcher(self) -> DebouncedInterimDispatcher:
+        """确保临时结果调度器存在。"""
         return ensure_interim_dispatcher(self)
 
     def _current_target_profile(self) -> str:
+        """获取当前目标的文本配置。"""
         return current_target_profile(self)
 
     def _text_digest(self, text: str) -> str:
+        """计算文本摘要。"""
         return text_digest(text)
 
     def _reset_session_diagnostics(self) -> None:
+        """重置会话诊断信息。"""
         self._session_peak_audio_level = 0.0
         self._session_saw_audio_level = False
         self._session_received_transcript = False
 
     def _record_audio_level(self, level: float) -> None:
+        """记录音频级别。"""
         self._session_saw_audio_level = True
         self._session_peak_audio_level = max(
             self._session_peak_audio_level,
@@ -584,6 +671,7 @@ class VoiceInputCoordinator:
         )
 
     def _should_warn_low_input(self) -> bool:
+        """检查是否应警告低输入。"""
         return (
             self._session_saw_audio_level
             and not self._session_received_transcript
@@ -591,6 +679,7 @@ class VoiceInputCoordinator:
         )
 
     def _resolve_committed_text(self, raw_text: str, result: PolishResult) -> tuple[str, str]:
+        """解析提交的文本。"""
         return _resolve_committed_text(self, raw_text, result)
 
     def _concat_transcript_text(self, current: str, incoming: str) -> str:
@@ -654,6 +743,7 @@ class VoiceInputCoordinator:
             self._schedule_polisher_warmup("after_session")
 
     async def _cancel_tip_session(self, reason: str) -> TipGatewayResult:
+        """取消 TIP 会话。"""
         if not self._tip_primary_active or self._tip_session_id is None:
             return TipGatewayResult(success=False, reason="tip_not_active", cleanup_performed=False)
         result = await self._tip_gateway.cancel_session(session_id=self._tip_session_id, reason=reason)
@@ -666,6 +756,7 @@ class VoiceInputCoordinator:
         return result
 
     async def _activate_tip_fallback(self, *, reason: str) -> bool:
+        """激活 TIP fallback。"""
         if not self._tip_primary_active:
             return False
         cleanup_result = await self._cancel_tip_session(reason)
@@ -794,6 +885,7 @@ class VoiceInputCoordinator:
         )
 
     def _status_for_error(self, message: str) -> str:
+        """生成错误状态消息。"""
         return _status_for_error(self, message)
 
     def _mode_display_label(self, mode: Mode | None = None) -> str:
